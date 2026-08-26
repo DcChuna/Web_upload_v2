@@ -1,0 +1,6 @@
+{
+  "name": "TeamHub - Projects & Useful Links",
+  "description": "A modern, minimalist, dark-mode-first platform for teams to share, discover, rate, and track projects and curated links.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
