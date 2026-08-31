@@ -1,6 +1,7 @@
 import React, { Component, ReactNode } from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './App';
+import { AuthProvider } from './context/AuthContext';
 import './index.css';
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: any }> {
@@ -46,7 +47,9 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boole
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <App />
+      <AuthProvider>
+        <App />
+      </AuthProvider>
     </ErrorBoundary>
   </React.StrictMode>
 );
