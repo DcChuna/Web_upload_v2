@@ -1,6 +1,6 @@
 import React, { Component, ReactNode } from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App.tsx';
+import { App } from './App';
 import './index.css';
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: any }> {
@@ -49,5 +49,4 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       <App />
     </ErrorBoundary>
   </React.StrictMode>
-  export default App;
 );
