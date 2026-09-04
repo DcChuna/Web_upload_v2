@@ -1,158 +1,212 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Post, PostType, ViewMode, FilterType, SortOption } from './types';
-import { DataService } from './lib/dataService';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { 
+  Plus, 
+  Layers, 
+  Zap, 
+  Link as LinkIcon, 
+  Search, 
+  Trophy, 
+  Database, 
+  Sparkles, 
+  ArrowUpRight, 
+  Filter,
+  Check,
+  AlertCircle,
+  Loader2,
+  Bookmark,
+  Share2,
+  LayoutGrid,
+  List,
+  Trash2,
+  Terminal
+} from 'lucide-react';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { Post, FilterType, SortOption, ViewMode } from './types';
+import { DataService, getLocalPosts } from './lib/dataService';
 import { Header } from './components/Header';
+import { FeedControls } from './components/FeedControls';
 import { PostCard } from './components/PostCard';
-import { DetailModal } from './components/DetailModal';
 import { NewSubmissionModal } from './components/NewSubmissionModal';
-import { EditSubmissionModal } from './components/EditSubmissionModal';
-import { AnalyticsModal } from './components/AnalyticsModal';
 import { AuthModal } from './components/AuthModal';
-import { DeleteConfirmModal } from './components/DeleteConfirmModal';
-import { EmptyState } from './components/EmptyState';
-import { Toast } from './components/Toast';
-import { useAuth } from './context/AuthContext';
-import { RefreshCw, Sparkles, FolderGit2, Globe, Gamepad2, Heart, Award } from 'lucide-react';
+import { AnalyticsModal } from './components/AnalyticsModal';
+import { LeaderboardModal } from './components/LeaderboardModal';
+import { ShareModal } from './components/ShareModal';
+import { DatabaseModal } from './components/DatabaseModal';
+import { EditSubmissionModal } from './components/EditSubmissionModal';
+import { CodeRunnerModal } from './components/CodeRunnerModal';
 
-export function App() {
-  const { user, isAdmin } = useAuth();
-  
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [favorites, setFavorites] = useState<string[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  
+function MainApp() {
+  const { user } = useAuth();
+
+  // Feed State
+  const [posts, setPosts] = useState<Post[]>(() => getLocalPosts());
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<FilterType>('all');
+  const [sortOption, setSortOption] = useState<SortOption>('latest');
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
-  const [sortOption, setSortOption] = useState<SortOption>('newest');
-  const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    try {
+      const saved = localStorage.getItem('th_view_mode');
+      return (saved === 'compact' || saved === 'grid') ? saved : 'grid';
+    } catch {
+      return 'grid';
+    }
+  });
 
-  const [selectedPost, setSelectedPost] = useState<Post | null>(null);
-  const [analyticsPost, setAnalyticsPost] = useState<Post | null>(null);
-  const [postToDelete, setPostToDelete] = useState<Post | null>(null);
+  // Deep-link highlighted post ID
+  const [highlightedPostId, setHighlightedPostId] = useState<string | null>(null);
+
+  // Modals
+  const [isNewPostOpen, setIsNewPostOpen] = useState(false);
   const [editingPost, setEditingPost] = useState<Post | null>(null);
-  const [isNewSubmissionOpen, setIsNewSubmissionOpen] = useState(false);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [isLeaderboardOpen, setIsLeaderboardOpen] = useState(false);
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [isDatabaseModalOpen, setIsDatabaseModalOpen] = useState(false);
+  const [selectedAnalyticsPost, setSelectedAnalyticsPost] = useState<Post | null>(null);
+  const [isCodeRunnerOpen, setIsCodeRunnerOpen] = useState(false);
+  const [codeRunnerPost, setCodeRunnerPost] = useState<Post | null>(null);
 
+  // System & Connection State
+  const [isSupabaseLive, setIsSupabaseLive] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3000);
+  }, []);
+
+  // Save viewMode preference
+  const handleViewModeChange = (mode: ViewMode) => {
+    setViewMode(mode);
+    try {
+      localStorage.setItem('th_view_mode', mode);
+    } catch {
+      // ignore
+    }
   };
 
+  // Load posts
   const loadPosts = async () => {
-    setIsLoading(true);
     try {
-      const result = await DataService.getPosts();
-      setPosts(result.posts);
-    } catch (e) {
-      console.error('Failed to load posts:', e);
-    } finally {
-      setIsLoading(false);
+      const fetched = await DataService.fetchPosts(user?.id);
+      if (Array.isArray(fetched)) {
+        setPosts(fetched);
+      }
+      const health = await DataService.checkHealth();
+      setIsSupabaseLive(health.healthy);
+    } catch (err) {
+      console.warn('Failed to refresh posts:', err);
     }
   };
 
   useEffect(() => {
     loadPosts();
-  }, []);
 
-  useEffect(() => {
-    const favs = DataService.getFavorites(user?.email);
-    setFavorites(favs);
+    // 1. Subscribe to live Supabase Postgres Realtime changes
+    const unsubscribe = DataService.subscribeToChanges(() => {
+      loadPosts();
+    });
+
+    // 2. Auto-refresh on window focus & every 4 seconds for instant cross-device sync
+    const onFocus = () => loadPosts();
+    window.addEventListener('focus', onFocus);
+    const interval = setInterval(loadPosts, 4000);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener('focus', onFocus);
+      clearInterval(interval);
+    };
   }, [user]);
 
-  const handleToggleFavorite = (post: Post) => {
-    const { isFavorite, favorites: updatedFavs } = DataService.toggleFavorite(post.id, user?.email);
-    setFavorites(updatedFavs);
-    if (isFavorite) {
-      showToast(`❤️ Added "${post.title.slice(0, 20)}" to favorites!`);
-    } else {
-      showToast(`🤍 Removed "${post.title.slice(0, 20)}" from favorites`);
-    }
-  };
-
-  const allTags = useMemo(() => {
-    const tagSet = new Set<string>();
-    posts.forEach((p) => {
-      if (Array.isArray(p.tags)) {
-        p.tags.forEach((t) => tagSet.add(t));
-      }
-    });
-    return Array.from(tagSet).sort();
-  }, [posts]);
-
-  const counts = useMemo(() => {
-    return {
-      all: posts.length,
-      project: posts.filter((p) => p.type === 'project').length,
-      game: posts.filter((p) => p.type === 'game').length,
-      link: posts.filter((p) => p.type === 'link').length,
-      favorites: posts.filter((p) => favorites.includes(p.id)).length,
-    };
-  }, [posts, favorites]);
-
-  const filteredPosts = useMemo(() => {
-    return posts
-      .filter((post) => {
-        if (filterType === 'favorites') {
-          if (!favorites.includes(post.id)) return false;
-        } else if (filterType !== 'all' && post.type !== filterType) {
-          return false;
-        }
-
-        if (selectedTag && (!post.tags || !post.tags.includes(selectedTag))) {
-          return false;
-        }
-
-        if (searchQuery.trim()) {
-          const q = searchQuery.toLowerCase();
-          const matchesTitle = post.title.toLowerCase().includes(q);
-          const matchesDesc = post.description?.toLowerCase().includes(q);
-          const matchesUrl = post.url.toLowerCase().includes(q);
-          const matchesUser = post.user_name?.toLowerCase().includes(q);
-          const matchesTags = post.tags?.some((t) => t.toLowerCase().includes(q));
-          return matchesTitle || matchesDesc || matchesUrl || matchesUser || matchesTags;
-        }
-
-        return true;
-      })
-      .sort((a, b) => {
-        if (sortOption === 'newest') {
-          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-        }
-        if (sortOption === 'rating') {
-          if (b.avg_rating === a.avg_rating) {
-            return b.ratings_count - a.ratings_count;
+  // Deep linking check on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const targetPostId = params.get('post') || window.location.hash.replace('#post-', '');
+      if (targetPostId) {
+        setHighlightedPostId(targetPostId);
+        setTimeout(() => {
+          const el = document.getElementById(`post-card-${targetPostId}`);
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
           }
-          return b.avg_rating - a.avg_rating;
-        }
-        if (sortOption === 'views') {
-          return b.views_count - a.views_count;
-        }
-        if (sortOption === 'alphabetical') {
-          return a.title.localeCompare(b.title);
-        }
-        return 0;
-      });
-  }, [posts, filterType, favorites, selectedTag, searchQuery, sortOption]);
-
-  const handleOpenLink = async (post: Post) => {
-    try {
-      const newViews = await DataService.recordView(post.id);
-      setPosts((prev) =>
-        prev.map((p) => (p.id === post.id ? { ...p, views_count: newViews } : p))
-      );
-    } catch (e) {
-      console.error('Error logging view:', e);
+        }, 600);
+      }
     }
-    window.open(post.url, '_blank', 'noopener,noreferrer');
-  };
+  }, []);
 
+  // Keyboard Shortcuts Handler
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+
+      if (e.key === 'Escape') {
+        setIsNewPostOpen(false);
+        setIsAuthOpen(false);
+        setIsLeaderboardOpen(false);
+        setIsShareModalOpen(false);
+        setSelectedAnalyticsPost(null);
+        return;
+      }
+
+      if (!isInput) {
+        if (e.key === '/' || (e.key === 'k' && (e.metaKey || e.ctrlKey))) {
+          e.preventDefault();
+          const searchEl = document.getElementById('global-search-input');
+          searchEl?.focus();
+        } else if (e.key === 'n' || e.key === 'N') {
+          e.preventDefault();
+          setIsNewPostOpen(true);
+        } else if (e.key === 's' || e.key === 'S') {
+          e.preventDefault();
+          setIsShareModalOpen(true);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // Post created callback: instant UI reflection
   const handlePostCreated = (newPost: Post) => {
-    setPosts((prev) => [newPost, ...prev]);
-    showToast(`🎉 "${newPost.title.slice(0, 24)}" published successfully!`);
+    setPosts((prev) => [newPost, ...prev.filter((p) => p.id !== newPost.id)]);
+
+    if (filterType !== 'all' && filterType !== newPost.type) {
+      setFilterType('all');
+    }
+
+    if (searchQuery.trim()) {
+      setSearchQuery('');
+    }
+    if (selectedTag && (!newPost.tags || !newPost.tags.includes(selectedTag))) {
+      setSelectedTag(null);
+    }
+
+    setHighlightedPostId(newPost.id);
+    showToast(`🚀 Published "${newPost.title.slice(0, 24)}..." successfully!`);
+
+    setTimeout(() => {
+      const el = document.getElementById(`post-card-${newPost.id}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 150);
+
+    loadPosts();
   };
 
+  // Delete post handler
+  const handleDeletePost = async (postToDelete: Post) => {
+    setPosts((prev) => prev.filter((p) => p.id !== postToDelete.id));
+    await DataService.deletePost(postToDelete.id);
+    showToast(`🗑️ Deleted "${postToDelete.title.slice(0, 20)}..."`);
+  };
+
+  // Update post handler
   const handlePostUpdated = (updatedPost: Post) => {
     setPosts((prev) =>
       prev.map((p) => (p.id === updatedPost.id ? updatedPost : p))
@@ -160,196 +214,340 @@ export function App() {
     showToast(`✨ Saved changes for "${updatedPost.title.slice(0, 24)}"`);
   };
 
-  const handleDeleteConfirm = async () => {
-    if (!postToDelete) return;
-    const targetTitle = postToDelete.title;
+  // Extract all unique tags
+  const availableTags = useMemo(() => {
+    const tagSet = new Set<string>();
+    posts.forEach((p) => {
+      if (Array.isArray(p.tags)) {
+        p.tags.forEach((t) => tagSet.add(t));
+      }
+    });
+    return Array.from(tagSet);
+  }, [posts]);
+
+  // Counts for tabs
+  const counts = useMemo(() => {
+    return {
+      all: posts.length,
+      project: posts.filter((p) => p.type === 'project').length,
+      link: posts.filter((p) => p.type === 'link').length,
+      code: posts.filter((p) => p.type === 'code' || !!p.code_snippet).length,
+    };
+  }, [posts]);
+
+  // Filter and sort posts
+  const filteredPosts = useMemo(() => {
+    return posts
+      .filter((p) => {
+        if (filterType !== 'all') {
+          if (filterType === 'code') {
+            if (p.type !== 'code' && !p.code_snippet) return false;
+          } else if (p.type !== filterType) {
+            return false;
+          }
+        }
+
+        if (selectedTag && (!p.tags || !p.tags.includes(selectedTag))) {
+          return false;
+        }
+
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase().trim();
+          const matchTitle = p.title.toLowerCase().includes(q);
+          const matchDesc = (p.description || '').toLowerCase().includes(q);
+          const matchAuthor = p.user_name.toLowerCase().includes(q);
+          const matchUrl = p.url.toLowerCase().includes(q);
+          const matchTags = (p.tags || []).some((t) => t.toLowerCase().includes(q));
+          const matchCode = (p.code_snippet || '').toLowerCase().includes(q) || (p.file_name || '').toLowerCase().includes(q);
+
+          if (!matchTitle && !matchDesc && !matchAuthor && !matchUrl && !matchTags && !matchCode) {
+            return false;
+          }
+        }
+
+        return true;
+      })
+      .sort((a, b) => {
+        if (sortOption === 'top_rated') {
+          if (b.avg_rating !== a.avg_rating) return b.avg_rating - a.avg_rating;
+          return b.ratings_count - a.ratings_count;
+        }
+        if (sortOption === 'most_viewed') {
+          return b.views_count - a.views_count;
+        }
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      });
+  }, [posts, filterType, selectedTag, searchQuery, sortOption]);
+
+  // Rate handler
+  const handleRate = async (postId: string, rating: number) => {
+    if (!user) {
+      setIsAuthOpen(true);
+      return;
+    }
+
     try {
-      await DataService.deletePost(postToDelete.id);
-      setPosts((prev) => prev.filter((p) => p.id !== postToDelete.id));
-      showToast(`🗑️ Deleted "${targetTitle.slice(0, 24)}"`);
-    } catch (e) {
-      showToast('❌ Failed to delete post');
-    } finally {
-      setPostToDelete(null);
+      const result = await DataService.ratePost(postId, rating, {
+        id: user.id,
+        email: user.email || 'user@team.internal',
+      });
+
+      setPosts((prev) =>
+        prev.map((p) => {
+          if (p.id === postId) {
+            return {
+              ...p,
+              avg_rating: result.avg_rating,
+              ratings_count: result.ratings_count,
+              user_rating: rating,
+            };
+          }
+          return p;
+        })
+      );
+
+      showToast(`Rated ${rating} star${rating > 1 ? 's' : ''}!`);
+    } catch (err) {
+      console.error('Rating failed:', err);
     }
   };
 
-  const featuredPost = useMemo(() => {
-    if (posts.length === 0) return null;
-    return [...posts].sort((a, b) => (b.avg_rating * b.ratings_count) - (a.avg_rating * a.ratings_count))[0];
-  }, [posts]);
+  // Open link handler (increments view count and opens URL)
+  const handleOpenLink = async (post: Post) => {
+    DataService.recordView(post.id).then((newCount) => {
+      setPosts((prev) =>
+        prev.map((p) => (p.id === post.id ? { ...p, views_count: newCount } : p))
+      );
+    });
+
+    window.open(post.url, '_blank', 'noopener,noreferrer');
+  };
+
+  // Action to trigger new post
+  const handleTriggerNewPost = () => {
+    setIsNewPostOpen(true);
+  };
+
+  // Action to trigger analytics
+  const handleOpenAnalytics = (post: Post) => {
+    if (!user) {
+      setIsAuthOpen(true);
+      showToast('Sign in to view granular metrics');
+    } else {
+      setSelectedAnalyticsPost(post);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-[#090a0f] text-zinc-100 flex flex-col selection:bg-indigo-500 selection:text-white">
+    <div className="min-h-screen bg-[#08090c] text-zinc-100 font-sans selection:bg-indigo-500 selection:text-white flex flex-col antialiased">
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2 px-3.5 py-2 rounded-xl bg-zinc-900/95 border border-indigo-500/40 text-xs font-medium text-white shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-bottom-2 duration-150">
+          <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Top Minimalist Header */}
       <Header
         searchQuery={searchQuery}
-        setSearchQuery={setSearchQuery}
-        filterType={filterType}
-        setFilterType={setFilterType}
-        selectedTag={selectedTag}
-        setSelectedTag={setSelectedTag}
-        allTags={allTags}
-        sortOption={sortOption}
-        setSortOption={setSortOption}
-        viewMode={viewMode}
-        setViewMode={setViewMode}
-        onOpenNewSubmission={() => {
-          if (!user) {
-            setIsAuthOpen(true);
-          } else {
-            setIsNewSubmissionOpen(true);
-          }
+        onSearchChange={setSearchQuery}
+        onOpenNewPostModal={handleTriggerNewPost}
+        onOpenAuthModal={() => setIsAuthOpen(true)}
+        onOpenLeaderboardModal={() => setIsLeaderboardOpen(true)}
+        onOpenShareModal={() => setIsShareModalOpen(true)}
+        onOpenDatabaseModal={() => setIsDatabaseModalOpen(true)}
+        onOpenCodeRunner={() => {
+          setCodeRunnerPost(null);
+          setIsCodeRunnerOpen(true);
         }}
-        onOpenAuth={() => setIsAuthOpen(true)}
-        counts={counts}
+        isSupabaseLive={isSupabaseLive}
+        totalPosts={posts.length}
       />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {!searchQuery && !selectedTag && filterType === 'all' && featuredPost && (
-          <div className="relative rounded-2xl p-6 sm:p-8 bg-gradient-to-r from-indigo-950/60 via-[#11131f] to-purple-950/40 border border-indigo-500/20 shadow-xl overflow-hidden backdrop-blur-sm">
-            <div className="absolute -right-10 -top-10 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
-            
-            <div className="relative z-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
-              <div className="space-y-2 max-w-2xl">
-                <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-indigo-500/20 border border-indigo-500/30 text-indigo-300">
-                  <Award className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Featured Community Spotlight</span>
-                </div>
-                <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white">
-                  {featuredPost.title}
-                </h2>
-                <p className="text-xs sm:text-sm text-zinc-300 line-clamp-2 leading-relaxed">
-                  {featuredPost.description}
-                </p>
-                <div className="flex flex-wrap items-center gap-2 pt-1">
-                  {featuredPost.tags?.slice(0, 3).map((t) => (
-                    <span key={t} className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-white/[0.05] border border-white/[0.08] text-zinc-300">
-                      #{t}
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex items-center gap-3 w-full sm:w-auto">
-                <button
-                  onClick={() => setSelectedPost(featuredPost)}
-                  className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl text-xs font-semibold bg-zinc-900/80 hover:bg-zinc-800 text-zinc-200 border border-white/[0.1] transition-all cursor-pointer text-center"
-                >
-                  Explore Details
-                </button>
-                <button
-                  onClick={() => handleOpenLink(featuredPost)}
-                  className="flex-1 sm:flex-initial px-5 py-2.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-                >
-                  <span>{featuredPost.type === 'game' ? 'Play Game' : 'Launch Project'}</span>
-                  {featuredPost.type === 'game' ? <Gamepad2 className="w-3.5 h-3.5" /> : <Sparkles className="w-3.5 h-3.5" />}
-                </button>
-              </div>
-            </div>
+      {/* Minimalist Sub-Header Context Bar */}
+      <div className="border-b border-white/[0.04] bg-[#090a0e]/40">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h1 className="text-lg sm:text-xl font-bold tracking-tight text-white flex items-center gap-2">
+              <span>Shared Knowledge &amp; Projects</span>
+            </h1>
+            <p className="text-xs text-zinc-400 mt-0.5 max-w-xl">
+              Curated repository of team builds, blueprints, and developer resources.
+            </p>
           </div>
-        )}
 
-        {(searchQuery || selectedTag || filterType !== 'all') && (
-          <div className="flex items-center justify-between p-3 bg-zinc-900/60 border border-white/[0.06] rounded-xl text-xs">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-zinc-400">Showing filtered results:</span>
-              {filterType !== 'all' && (
-                <span className="px-2 py-0.5 rounded bg-indigo-500/15 border border-indigo-500/30 text-indigo-300 font-mono text-[11px] capitalize">
-                  Filter: {filterType}
-                </span>
-              )}
-              {selectedTag && (
-                <span className="px-2 py-0.5 rounded bg-purple-500/15 border border-purple-500/30 text-purple-300 font-mono text-[11px]">
-                  Tag: #{selectedTag}
-                </span>
-              )}
-              {searchQuery && (
-                <span className="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 font-mono text-[11px]">
-                  Query: "{searchQuery}"
-                </span>
-              )}
-              <span className="text-zinc-400 font-mono">({filteredPosts.length} items)</span>
-            </div>
-
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            {/* Quick Online Code Compiler / Runner */}
             <button
               onClick={() => {
-                setSearchQuery('');
-                setSelectedTag(null);
-                setFilterType('all');
+                setCodeRunnerPost(null);
+                setIsCodeRunnerOpen(true);
               }}
-              className="text-zinc-400 hover:text-white transition-colors cursor-pointer text-xs underline"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-300 bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-500/40 hover:border-emerald-400/60 shadow-sm transition-all cursor-pointer"
+              title="Open online code compiler and runner (Python, JavaScript, etc.)"
             >
-              Reset all filters
+              <Terminal className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Compile &amp; Run</span>
+            </button>
+
+            {/* Quick Share with Friends Trigger */}
+            <button
+              onClick={() => setIsShareModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-zinc-200 bg-zinc-900/80 hover:bg-zinc-800 border border-white/[0.08] hover:border-white/[0.15] transition-all cursor-pointer"
+            >
+              <Share2 className="w-3.5 h-3.5 text-sky-400" />
+              <span>Share Hub</span>
+            </button>
+
+            {/* Quick New Submission */}
+            <button
+              onClick={handleTriggerNewPost}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] border border-indigo-400/30 shadow-sm shadow-indigo-600/20 transition-all cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+              <span>Share Resource</span>
             </button>
           </div>
-        )}
+        </div>
+      </div>
 
-        {isLoading ? (
-          <div className="py-20 flex flex-col items-center justify-center gap-3 text-zinc-500">
-            <RefreshCw className="w-6 h-6 animate-spin text-indigo-400" />
-            <p className="text-xs font-mono">Loading hub database...</p>
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* Controls: Filter Pills, Sorts, View Mode, Dynamic Tag Badges */}
+        <FeedControls
+          currentFilter={filterType}
+          onFilterChange={setFilterType}
+          currentSort={sortOption}
+          onSortChange={setSortOption}
+          viewMode={viewMode}
+          onViewModeChange={handleViewModeChange}
+          selectedTag={selectedTag}
+          onSelectTag={setSelectedTag}
+          availableTags={availableTags}
+          counts={counts}
+        />
+
+        {/* Feed Posts */}
+        {filteredPosts.length === 0 ? (
+          /* Empty Search or Filter State */
+          <div className="flex flex-col items-center justify-center text-center py-16 px-4 rounded-2xl bg-zinc-950/40 border border-white/[0.05]">
+            <div className="w-10 h-10 rounded-xl bg-zinc-900 flex items-center justify-center text-zinc-500 mb-2.5 border border-white/[0.08]">
+              <Search className="w-5 h-5" />
+            </div>
+            <h3 className="text-sm font-semibold text-zinc-200">No resources found</h3>
+            <p className="text-xs text-zinc-400 max-w-sm mt-0.5 mb-4">
+              {searchQuery || selectedTag
+                ? 'Try adjusting your search terms or clearing active filters.'
+                : 'No submissions posted yet. Be the first to share your project or favorite link!'}
+            </p>
+            <div className="flex items-center gap-2">
+              {(searchQuery || selectedTag || filterType !== 'all') && (
+                <button
+                  onClick={() => {
+                    setSearchQuery('');
+                    setSelectedTag(null);
+                    setFilterType('all');
+                  }}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-zinc-300 bg-zinc-900 hover:bg-zinc-800 border border-white/[0.08] transition-colors cursor-pointer"
+                >
+                  Clear Filters
+                </button>
+              )}
+              <button
+                onClick={handleTriggerNewPost}
+                className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 transition-colors cursor-pointer"
+              >
+                + Create First Submission
+              </button>
+            </div>
           </div>
-        ) : filteredPosts.length > 0 ? (
-          <div
-            className={
-              viewMode === 'grid'
-                ? 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5'
-                : 'space-y-3'
-            }
-          >
+        ) : viewMode === 'compact' ? (
+          /* Compact List View */
+          <div className="space-y-2">
             {filteredPosts.map((post) => (
               <PostCard
                 key={post.id}
                 post={post}
-                viewMode={viewMode}
-                isFavorite={favorites.includes(post.id)}
-                onOpenModal={(p) => setSelectedPost(p)}
-                onOpenAnalytics={(p) => setAnalyticsPost(p)}
+                viewMode="compact"
+                isHighlighted={highlightedPostId === post.id}
+                onRate={handleRate}
                 onOpenLink={handleOpenLink}
-                onToggleFavorite={handleToggleFavorite}
+                onOpenAnalytics={handleOpenAnalytics}
                 onRequireAuth={() => setIsAuthOpen(true)}
                 onShowToast={showToast}
-                onDeletePost={(p) => setPostToDelete(p)}
+                onDeletePost={handleDeletePost}
                 onEditPost={(p) => setEditingPost(p)}
+                onRunCode={(p) => {
+                  setCodeRunnerPost(p);
+                  setIsCodeRunnerOpen(true);
+                }}
               />
             ))}
           </div>
         ) : (
-          <EmptyState
-            filterType={filterType}
-            searchQuery={searchQuery}
-            selectedTag={selectedTag}
-            onResetFilters={() => {
-              setFilterType('all');
-              setSearchQuery('');
-              setSelectedTag(null);
-            }}
-            onOpenNewSubmission={() => {
-              if (!user) {
-                setIsAuthOpen(true);
-              } else {
-                setIsNewSubmissionOpen(true);
-              }
-            }}
-          />
+          /* Grid Card View */
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4.5">
+            {filteredPosts.map((post) => (
+              <PostCard
+                key={post.id}
+                post={post}
+                viewMode="grid"
+                isHighlighted={highlightedPostId === post.id}
+                onRate={handleRate}
+                onOpenLink={handleOpenLink}
+                onOpenAnalytics={handleOpenAnalytics}
+                onRequireAuth={() => setIsAuthOpen(true)}
+                onShowToast={showToast}
+                onDeletePost={handleDeletePost}
+                onEditPost={(p) => setEditingPost(p)}
+                onRunCode={(p) => {
+                  setCodeRunnerPost(p);
+                  setIsCodeRunnerOpen(true);
+                }}
+              />
+            ))}
+          </div>
         )}
       </main>
 
-      <DetailModal
-        post={selectedPost}
-        isOpen={!!selectedPost}
-        isFavorite={selectedPost ? favorites.includes(selectedPost.id) : false}
-        onClose={() => setSelectedPost(null)}
-        onOpenAnalytics={(p) => setAnalyticsPost(p)}
-        onOpenLink={handleOpenLink}
-        onToggleFavorite={handleToggleFavorite}
-        onRequireAuth={() => setIsAuthOpen(true)}
-        onShowToast={showToast}
+      {/* Clean Minimalist Footer */}
+      <footer className="border-t border-white/[0.04] py-5 bg-[#06070a] mt-auto text-zinc-500 text-xs">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-zinc-400">
+            <span className="font-semibold text-zinc-300">TeamHub</span>
+            <span>—</span>
+            <span>Minimalist project sharing &amp; knowledge feed</span>
+          </div>
+
+          <div className="flex items-center gap-3 text-[11px]">
+            <button
+              onClick={() => setIsShareModalOpen(true)}
+              className="hover:text-sky-400 transition-colors cursor-pointer"
+            >
+              Share with Friends
+            </button>
+            <span>•</span>
+            <button
+              onClick={() => setIsLeaderboardOpen(true)}
+              className="hover:text-zinc-300 transition-colors cursor-pointer"
+            >
+              Leaderboard
+            </button>
+          </div>
+        </div>
+      </footer>
+
+      {/* Modals */}
+      <ShareModal
+        isOpen={isShareModalOpen}
+        onClose={() => setIsShareModalOpen(false)}
+        totalPosts={posts.length}
       />
 
       <NewSubmissionModal
-        isOpen={isNewSubmissionOpen}
-        onClose={() => setIsNewSubmissionOpen(false)}
+        isOpen={isNewPostOpen}
+        onClose={() => setIsNewPostOpen(false)}
         onPostCreated={handlePostCreated}
       />
 
@@ -360,28 +558,50 @@ export function App() {
         onPostUpdated={handlePostUpdated}
       />
 
-      <AnalyticsModal
-        post={analyticsPost}
-        isOpen={!!analyticsPost}
-        onClose={() => setAnalyticsPost(null)}
-      />
-
-      <DeleteConfirmModal
-        post={postToDelete}
-        isOpen={!!postToDelete}
-        onClose={() => setPostToDelete(null)}
-        onConfirm={handleDeleteConfirm}
-      />
-
       <AuthModal
         isOpen={isAuthOpen}
         onClose={() => setIsAuthOpen(false)}
-        onSuccess={(loggedUser) => {
-          showToast(`✨ Welcome ${loggedUser.name}!`);
-        }}
       />
 
-      <Toast message={toastMessage} onClose={() => setToastMessage(null)} />
+      <AnalyticsModal
+        post={selectedAnalyticsPost}
+        isOpen={!!selectedAnalyticsPost}
+        onClose={() => setSelectedAnalyticsPost(null)}
+        onOpenLink={handleOpenLink}
+      />
+
+      <LeaderboardModal
+        posts={posts}
+        isOpen={isLeaderboardOpen}
+        onClose={() => setIsLeaderboardOpen(false)}
+        onOpenLink={handleOpenLink}
+        onOpenAnalytics={handleOpenAnalytics}
+      />
+
+      <DatabaseModal
+        isOpen={isDatabaseModalOpen}
+        onClose={() => setIsDatabaseModalOpen(false)}
+        isLive={isSupabaseLive}
+        onRefresh={loadPosts}
+      />
+
+      <CodeRunnerModal
+        isOpen={isCodeRunnerOpen}
+        onClose={() => {
+          setIsCodeRunnerOpen(false);
+          setCodeRunnerPost(null);
+        }}
+        initialPost={codeRunnerPost}
+        onPostCreated={handlePostCreated}
+      />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <MainApp />
+    </AuthProvider>
   );
 }
