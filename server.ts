@@ -27,6 +27,9 @@ interface PostRecord {
   views_count: number;
   avg_rating: number;
   ratings_count: number;
+  code_snippet?: string;
+  code_language?: string;
+  file_name?: string;
 }
 
 interface RatingRecord {
@@ -102,6 +105,145 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', postsCount: database.posts.length });
 });
 
+// RUN CODE ONLINE (Python / Node server sandbox execution)
+app.post('/api/run-code', async (req, res) => {
+  try {
+    const { language, code, stdin } = req.body;
+    if (!code || typeof code !== 'string') {
+      return res.status(400).json({ error: 'Code content is required' });
+    }
+
+    if (code.length > 80000) {
+      return res.status(400).json({ error: 'Code size limit exceeded (max 80KB)' });
+    }
+
+    const lang = (language || 'python').toLowerCase();
+    const startTime = Date.now();
+
+    if (lang === 'python' || lang === 'py') {
+      const { spawn } = await import('child_process');
+      const pyProcess = spawn('python3', ['-u', '-c', code]);
+
+      let stdout = '';
+      let stderr = '';
+      let isTimedOut = false;
+
+      const timeoutId = setTimeout(() => {
+        isTimedOut = true;
+        try { pyProcess.kill('SIGKILL'); } catch {}
+      }, 8000);
+
+      if (stdin && typeof stdin === 'string') {
+        pyProcess.stdin.write(stdin);
+        pyProcess.stdin.end();
+      } else {
+        pyProcess.stdin.end();
+      }
+
+      pyProcess.stdout.on('data', (data) => {
+        if (stdout.length < 50000) stdout += data.toString();
+      });
+
+      pyProcess.stderr.on('data', (data) => {
+        if (stderr.length < 50000) stderr += data.toString();
+      });
+
+      pyProcess.on('close', (exitCode) => {
+        clearTimeout(timeoutId);
+        const durationMs = Date.now() - startTime;
+        if (isTimedOut) {
+          return res.json({
+            success: false,
+            stdout,
+            stderr: (stderr ? stderr + '\n' : '') + 'Execution timed out after 8 seconds.',
+            exitCode: 124,
+            durationMs,
+            engine: 'server-native',
+          });
+        }
+        res.json({
+          success: exitCode === 0,
+          stdout,
+          stderr,
+          exitCode: exitCode ?? 0,
+          durationMs,
+          engine: 'server-native',
+        });
+      });
+
+      pyProcess.on('error', (err) => {
+        clearTimeout(timeoutId);
+        res.status(500).json({
+          error: 'Failed to launch Python engine: ' + err.message,
+          engine: 'server-native',
+        });
+      });
+    } else if (lang === 'javascript' || lang === 'js' || lang === 'node') {
+      const { spawn } = await import('child_process');
+      const nodeProcess = spawn('node', ['-e', code]);
+
+      let stdout = '';
+      let stderr = '';
+      let isTimedOut = false;
+
+      const timeoutId = setTimeout(() => {
+        isTimedOut = true;
+        try { nodeProcess.kill('SIGKILL'); } catch {}
+      }, 8000);
+
+      if (stdin && typeof stdin === 'string') {
+        nodeProcess.stdin.write(stdin);
+        nodeProcess.stdin.end();
+      } else {
+        nodeProcess.stdin.end();
+      }
+
+      nodeProcess.stdout.on('data', (data) => {
+        if (stdout.length < 50000) stdout += data.toString();
+      });
+
+      nodeProcess.stderr.on('data', (data) => {
+        if (stderr.length < 50000) stderr += data.toString();
+      });
+
+      nodeProcess.on('close', (exitCode) => {
+        clearTimeout(timeoutId);
+        const durationMs = Date.now() - startTime;
+        if (isTimedOut) {
+          return res.json({
+            success: false,
+            stdout,
+            stderr: (stderr ? stderr + '\n' : '') + 'Execution timed out after 8 seconds.',
+            exitCode: 124,
+            durationMs,
+            engine: 'server-native',
+          });
+        }
+        res.json({
+          success: exitCode === 0,
+          stdout,
+          stderr,
+          exitCode: exitCode ?? 0,
+          durationMs,
+          engine: 'server-native',
+        });
+      });
+
+      nodeProcess.on('error', (err) => {
+        clearTimeout(timeoutId);
+        res.status(500).json({
+          error: 'Failed to launch Node engine: ' + err.message,
+          engine: 'server-native',
+        });
+      });
+    } else {
+      res.status(400).json({ error: `Language '${lang}' not supported on server. Use client-side execution.` });
+    }
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Execution failed' });
+  }
+});
+
 // GET all posts
 app.get('/api/posts', (req, res) => {
   const currentUserId = req.query.userId as string | undefined;
@@ -132,17 +274,17 @@ app.get('/api/posts', (req, res) => {
 // CREATE new post
 app.post('/api/posts', (req, res) => {
   try {
-    const { title, url, type, description, image_url, tags, user_id, user_email, user_name } = req.body;
+    const { title, url, type, description, image_url, tags, user_id, user_email, user_name, code_snippet, code_language, file_name } = req.body;
     
-    if (!title || !url) {
-      return res.status(400).json({ error: 'Title and URL are required' });
+    if (!title) {
+      return res.status(400).json({ error: 'Title is required' });
     }
 
     const newPost: PostRecord = {
       id: crypto.randomUUID ? crypto.randomUUID() : `post-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       created_at: new Date().toISOString(),
       title: String(title).trim(),
-      url: String(url).trim(),
+      url: url ? String(url).trim() : (type === 'code' ? `#code-${Date.now()}` : 'https://teamhub.internal'),
       type: type || 'project',
       description: description ? String(description).trim() : '',
       image_url: image_url || null,
@@ -153,6 +295,9 @@ app.post('/api/posts', (req, res) => {
       views_count: 0,
       avg_rating: 0,
       ratings_count: 0,
+      code_snippet: code_snippet || undefined,
+      code_language: code_language || undefined,
+      file_name: file_name || undefined,
     };
 
     // Prepend to posts list
