@@ -3,11 +3,15 @@ import {
   X, 
   Sparkles, 
   FolderGit2, 
+  Code, 
+  Palette, 
   Image, 
   Link2, 
   Tags, 
-  CheckCircle2, 
+  Layers, 
+  FileText, 
   AlertCircle, 
+  CheckCircle2, 
   Upload,
   RefreshCw,
   Trash2,
@@ -26,6 +30,7 @@ interface EditSubmissionModalProps {
 const PRESET_TAGS: Record<PostType, string[]> = {
   project: ['Fullstack', 'React', 'NextJS', 'Vite', 'Mobile', 'OpenSource', 'SaaS', 'Frontend', 'Backend', 'TypeScript', 'Tailwind'],
   link: ['Guide', 'Resource', 'Snippet', 'Inspiration', 'Tool', 'Article', 'Documentation', 'API'],
+  code: ['Python', 'JavaScript', 'Algorithms', 'Script', 'Automation', 'CLI', 'WebAssembly', 'Backend'],
 };
 
 export function EditSubmissionModal({
@@ -50,6 +55,7 @@ export function EditSubmissionModal({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Sync state when post changes or modal opens
   useEffect(() => {
     if (post) {
       setTitle(post.title || '');
@@ -135,6 +141,13 @@ export function EditSubmissionModal({
       formattedUrl = `https://${formattedUrl}`;
     }
 
+    try {
+      new URL(formattedUrl);
+    } catch {
+      setErrorMsg('Invalid URL format. Please include a valid domain (e.g., https://example.com)');
+      return;
+    }
+
     setIsSubmitting(true);
 
     try {
@@ -146,7 +159,7 @@ export function EditSubmissionModal({
         finalImageUrl = await DataService.uploadImage(imageFile);
       }
 
-      const { post: updatedPost, error: subError } = await DataService.updatePost(
+      const { post: updatedPost, savedToSupabase, error: subError } = await DataService.updatePost(
         post.id,
         {
           title: title.trim(),
@@ -158,8 +171,8 @@ export function EditSubmissionModal({
         }
       );
 
-      if (subError) {
-        console.warn('Update notice:', subError);
+      if (!savedToSupabase && subError) {
+        console.warn('Note: post saved to local cache, Supabase update notice:', subError);
       }
 
       setSuccessMsg('Project updated successfully!');
@@ -167,7 +180,7 @@ export function EditSubmissionModal({
 
       setTimeout(() => {
         onClose();
-      }, 400);
+      }, 500);
     } catch (err: any) {
       console.error('Update failed:', err);
       setErrorMsg(err?.message || 'Failed to update project. Please try again.');
@@ -194,7 +207,7 @@ export function EditSubmissionModal({
               <Edit3 className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="font-semibold text-zinc-100 text-base">Edit Resource / Project</h3>
+              <h3 className="font-semibold text-zinc-100 text-base">Edit Project / Work</h3>
               <p className="text-xs text-zinc-400">Update title, link, description, type, or preview image</p>
             </div>
           </div>
@@ -209,13 +222,15 @@ export function EditSubmissionModal({
         {/* Content Form */}
         <form onSubmit={handleSubmit} className="p-6 space-y-5 max-h-[80vh] overflow-y-auto">
           
+          {/* Error Alert */}
           {errorMsg && (
-            <div className="p-3 bg-rose-950/40 border border-rose-500/30 rounded-xl flex items-center gap-2.5 text-rose-300 text-xs">
+            <div className="p-3 bg-rose-950/40 border border-rose-500/30 rounded-xl flex items-center gap-2.5 text-rose-300 text-xs animate-shake">
               <AlertCircle className="w-4 h-4 shrink-0" />
               <span>{errorMsg}</span>
             </div>
           )}
 
+          {/* Success Alert */}
           {successMsg && (
             <div className="p-3 bg-emerald-950/40 border border-emerald-500/30 rounded-xl flex items-center gap-2.5 text-emerald-300 text-xs">
               <CheckCircle2 className="w-4 h-4 shrink-0" />
@@ -242,8 +257,8 @@ export function EditSubmissionModal({
                     key={item.id}
                     type="button"
                     onClick={() => {
-                      setType(item.id as PostType);
-                      const presets = PRESET_TAGS[item.id as PostType];
+                      setType(item.id);
+                      const presets = PRESET_TAGS[item.id];
                       if (presets && presets[0] && !tags.includes(presets[0])) {
                         setTags([presets[0], ...tags.slice(0, 2)]);
                       }
@@ -262,7 +277,7 @@ export function EditSubmissionModal({
             </div>
           </div>
 
-          {/* Title */}
+          {/* Title Input */}
           <div>
             <label className="block text-xs font-semibold text-zinc-300 uppercase tracking-wider mb-1.5">
               Title <span className="text-rose-400">*</span>
@@ -272,12 +287,12 @@ export function EditSubmissionModal({
               required
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g., Gold Rush Duel"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900/80 border border-white/[0.08] text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500 transition-all font-medium"
+              placeholder="e.g., Gold Rush Duel, Team Knowledge Base"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900/80 border border-white/[0.08] text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all font-medium"
             />
           </div>
 
-          {/* URL */}
+          {/* URL / Link Input */}
           <div>
             <label className="block text-xs font-semibold text-zinc-300 uppercase tracking-wider mb-1.5">
               Live URL or Repository Link <span className="text-rose-400">*</span>
@@ -291,23 +306,26 @@ export function EditSubmissionModal({
                 required
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://..."
-                className="w-full pl-9.5 pr-3.5 py-2.5 rounded-xl bg-zinc-900/80 border border-white/[0.08] text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500 transition-all font-mono text-xs"
+                placeholder="https://my-app.vercel.app or https://github.com/..."
+                className="w-full pl-9.5 pr-3.5 py-2.5 rounded-xl bg-zinc-900/80 border border-white/[0.08] text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all font-mono text-xs"
               />
             </div>
           </div>
 
-          {/* Description */}
+          {/* Description (Markdown) */}
           <div>
-            <label className="block text-xs font-semibold text-zinc-300 uppercase tracking-wider mb-1.5">
-              Description
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">
+                Description &amp; Highlights
+              </label>
+              <span className="text-[10px] text-zinc-400 font-mono">Markdown supported</span>
+            </div>
             <textarea
               rows={3}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Explain the project rules, features, tech stack..."
-              className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900/80 border border-white/[0.08] text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500 transition-all resize-none leading-relaxed"
+              placeholder="Explain the project rules, features, tech stack, or why you built it..."
+              className="w-full px-3.5 py-2.5 rounded-xl bg-zinc-900/80 border border-white/[0.08] text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all resize-none leading-relaxed"
             />
           </div>
 
@@ -316,6 +334,8 @@ export function EditSubmissionModal({
             <label className="block text-xs font-semibold text-zinc-300 uppercase tracking-wider mb-1.5">
               Tags
             </label>
+            
+            {/* Tag List */}
             <div className="flex flex-wrap gap-1.5 mb-2">
               {tags.map((tag) => (
                 <span
@@ -334,13 +354,14 @@ export function EditSubmissionModal({
               ))}
             </div>
 
+            {/* Tag Input */}
             <div className="flex gap-2">
               <input
                 type="text"
                 value={tagInput}
                 onChange={(e) => setTagInput(e.target.value)}
                 onKeyDown={handleTagKeyDown}
-                placeholder="Add tag (e.g. NextJS, AI, Tailwind)"
+                placeholder="Type tag and press Enter (e.g. NextJS, AI, Tailwind)"
                 className="flex-1 px-3 py-1.5 rounded-lg bg-zinc-900/80 border border-white/[0.08] text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500"
               />
               <button
@@ -353,9 +374,24 @@ export function EditSubmissionModal({
                 Add Tag
               </button>
             </div>
+
+            {/* Quick Presets */}
+            <div className="flex items-center gap-1.5 mt-2 flex-wrap text-[11px] text-zinc-400">
+              <span>Suggestions:</span>
+              {(PRESET_TAGS[type] || PRESET_TAGS.project).slice(0, 5).map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => handleAddTag(preset)}
+                  className="px-1.5 py-0.5 rounded bg-zinc-900 border border-white/[0.04] text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
+                >
+                  +{preset}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {/* Image */}
+          {/* Thumbnail / Image */}
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">
@@ -439,7 +475,7 @@ export function EditSubmissionModal({
             )}
           </div>
 
-          {/* Footer */}
+          {/* Footer Actions */}
           <div className="pt-3 border-t border-white/[0.06] flex items-center justify-end gap-2.5">
             <button
               type="button"
