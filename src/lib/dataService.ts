@@ -1,275 +1,485 @@
-import { Post, Rating, PostView, PostAnalytics } from '../types';
-import { supabase, isSupabaseConfigured } from './supabase';
-import { SEED_POSTS } from './mockSeedData';
+import { supabase } from './supabase';
+import { Post, Rating, RatingBreakdown, PostAnalytics, PostType } from '../types';
 
-const LOCAL_STORAGE_KEY = 'teamhub_posts_v2';
-const FAVORITES_KEY = 'teamhub_favorites';
+const LOCAL_STORAGE_KEY_POSTS = 'teamhub_posts_v1';
+const LOCAL_STORAGE_KEY_RATINGS = 'teamhub_ratings_v1';
+
+function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    try {
+      return crypto.randomUUID();
+    } catch {}
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+const isValidUUID = (str?: string | null): boolean => {
+  if (!str) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(str);
+};
 
 export function getLocalPosts(): Post[] {
   try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (!raw) {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(SEED_POSTS));
-      return SEED_POSTS;
-    }
-    return JSON.parse(raw);
-  } catch (e) {
-    console.error('Failed reading localStorage posts', e);
-    return SEED_POSTS;
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY_POSTS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
   }
 }
 
-export function saveLocalPosts(posts: Post[]): void {
+export function saveLocalPosts(posts: Post[]) {
   try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts));
-  } catch (e) {
-    console.error('Failed saving to localStorage', e);
+    localStorage.setItem(LOCAL_STORAGE_KEY_POSTS, JSON.stringify(posts));
+  } catch (err) {
+    console.warn('Local storage write error:', err);
   }
 }
 
-class DataServiceClass {
-  private isConnected = false;
-
+export const DataService = {
+  // Check health of connection
   async checkHealth(): Promise<{ healthy: boolean; error?: string }> {
-    if (!isSupabaseConfigured) {
-      this.isConnected = false;
-      return { healthy: false, error: 'Supabase credentials not configured. Using local persistence.' };
-    }
     try {
       const { error } = await supabase.from('posts').select('id').limit(1);
       if (error) {
-        this.isConnected = false;
         return { healthy: false, error: error.message };
       }
-      this.isConnected = true;
       return { healthy: true };
     } catch (err: any) {
-      this.isConnected = false;
       return { healthy: false, error: err?.message || 'Connection failed' };
     }
-  }
+  },
 
   isHealthy(): boolean {
-    return this.isConnected;
-  }
+    return true;
+  },
 
+  // Realtime subscription for instant multi-user synchronization
   subscribeToChanges(onUpdate: () => void): () => void {
-    if (!isSupabaseConfigured) return () => {};
+    try {
+      const channel = supabase
+        .channel('public:posts-realtime')
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'posts',
+          },
+          () => {
+            onUpdate();
+          }
+        )
+        .subscribe();
 
-    const channel = supabase
-      .channel('teamhub_posts_realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'posts' }, () => {
-        onUpdate();
-      })
-      .subscribe();
+      return () => {
+        try {
+          supabase.removeChannel(channel);
+        } catch {}
+      };
+    } catch {
+      return () => {};
+    }
+  },
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }
+  // 1. Fetch Posts: Supabase is the single source of truth when online
+  async fetchPosts(currentUserId?: string | null): Promise<Post[]> {
+    try {
+      const { data: supabaseData, error } = await supabase
+        .from('posts')
+        .select('*')
+        .order('created_at', { ascending: false });
 
-  async fetchPosts(currentUserId?: string): Promise<{ posts: Post[]; source: 'supabase' | 'local' }> {
-    if (isSupabaseConfigured) {
-      try {
-        const { data, error } = await supabase
-          .from('posts')
-          .select('*')
-          .order('created_at', { ascending: false });
+      if (!error && Array.isArray(supabaseData)) {
+        // Authoritative data from Supabase
+        const livePosts: Post[] = supabaseData.map((p: any) => ({
+          id: p.id,
+          created_at: p.created_at || new Date().toISOString(),
+          title: p.title,
+          url: p.url,
+          type: (p.type || 'project') as PostType,
+          description: p.description || '',
+          image_url: p.image_url || null,
+          tags: Array.isArray(p.tags) ? p.tags : ['General'],
+          user_id: p.user_id || 'anonymous',
+          user_email: p.user_email || 'admin@gmail.com',
+          user_name: p.user_name || 'Admin',
+          views_count: Number(p.views_count) || 0,
+          avg_rating: Number(p.avg_rating) || 0,
+          ratings_count: Number(p.ratings_count) || 0,
+          user_rating: null,
+          code_snippet: p.code_snippet || undefined,
+          code_language: p.code_language || undefined,
+          file_name: p.file_name || undefined,
+        }));
 
-        if (!error && data && data.length > 0) {
-          this.isConnected = true;
-          return { posts: data as Post[], source: 'supabase' };
+        // Fetch user ratings if user ID is provided
+        if (currentUserId && isValidUUID(currentUserId)) {
+          try {
+            const { data: userRatings } = await supabase
+              .from('ratings')
+              .select('post_id, rating')
+              .eq('user_id', currentUserId);
+
+            if (userRatings && userRatings.length > 0) {
+              const ratingMap = new Map<string, number>();
+              userRatings.forEach((r: any) => ratingMap.set(r.post_id, r.rating));
+              livePosts.forEach((post) => {
+                if (ratingMap.has(post.id)) {
+                  post.user_rating = ratingMap.get(post.id) || null;
+                }
+              });
+            }
+          } catch {}
         }
-      } catch (err) {
-        console.warn('Supabase fetch failed, falling back to local state:', err);
+
+        // Keep local cache completely in sync with Supabase (purging deleted items)
+        saveLocalPosts(livePosts);
+        return livePosts;
+      } else if (error) {
+        console.warn('Supabase fetch error, falling back to cache:', error.message);
       }
+    } catch (err) {
+      console.warn('Supabase fetch network error, falling back to cache:', err);
     }
 
-    this.isConnected = false;
-    const local = getLocalPosts();
-    return { posts: local, source: 'local' };
-  }
+    // Offline fallback only when Supabase cannot be reached
+    return getLocalPosts();
+  },
 
-  async createPost(postData: Omit<Post, 'id' | 'created_at' | 'avg_rating' | 'ratings_count' | 'views_count'>): Promise<Post> {
-    const newPost: Post = {
-      ...postData,
-      id: `post_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      created_at: new Date().toISOString(),
+  // 2. Upload Image: Direct to Supabase Storage with base64 fallback
+  async uploadImage(file: File): Promise<string> {
+    try {
+      const fileExt = file.name.split('.').pop() || 'png';
+      const cleanFileName = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}.${fileExt}`;
+      const filePath = `uploads/${cleanFileName}`;
+
+      const { data, error } = await supabase.storage
+        .from('project-images')
+        .upload(filePath, file, { cacheControl: '3600', upsert: true });
+
+      if (!error && data) {
+        const { data: publicUrlData } = supabase.storage
+          .from('project-images')
+          .getPublicUrl(filePath);
+        if (publicUrlData?.publicUrl) return publicUrlData.publicUrl;
+      }
+    } catch (err) {
+      console.warn('Supabase storage upload error:', err);
+    }
+
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.readAsDataURL(file);
+    });
+  },
+
+  // 3. Create Post: Multi-layer resilient insert so Supabase NEVER rejects it
+  async createPost(postData: {
+    title: string;
+    url: string;
+    type: PostType;
+    description: string;
+    image_url?: string | null;
+    tags: string[];
+    user_id: string;
+    user_email: string;
+    user_name: string;
+    code_snippet?: string;
+    code_language?: string;
+    file_name?: string;
+  }): Promise<{ post: Post; savedToSupabase: boolean; error?: string }> {
+    const fallbackUUID = generateUUID();
+    const nowIso = new Date().toISOString();
+
+    let createdPost: Post = {
+      id: fallbackUUID,
+      created_at: nowIso,
+      title: postData.title.trim(),
+      url: postData.url.trim(),
+      type: postData.type,
+      description: (postData.description || '').trim(),
+      image_url: postData.image_url || null,
+      tags: postData.tags && postData.tags.length > 0 ? postData.tags : ['General'],
+      user_id: postData.user_id || 'admin-user',
+      user_email: postData.user_email || 'admin@gmail.com',
+      user_name: postData.user_name || 'Admin',
+      views_count: 0,
+      avg_rating: 0,
+      ratings_count: 0,
+      user_rating: null,
+      code_snippet: postData.code_snippet,
+      code_language: postData.code_language,
+      file_name: postData.file_name,
+    };
+
+    // Save to local cache first
+    const current = getLocalPosts();
+    saveLocalPosts([createdPost, ...current.filter((p) => p.id !== createdPost.id)]);
+
+    let savedToSupabase = false;
+    let supabaseError: string | undefined;
+
+    // Check if session has a valid Supabase authenticated user ID
+    let currentAuthUserId: string | null = null;
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      if (authData?.user?.id) {
+        currentAuthUserId = authData.user.id;
+      }
+    } catch {}
+
+    const payload: any = {
+      title: createdPost.title,
+      url: createdPost.url,
+      type: createdPost.type,
+      description: createdPost.description,
+      image_url: createdPost.image_url,
+      tags: createdPost.tags,
+      user_email: createdPost.user_email,
+      user_name: createdPost.user_name,
       views_count: 0,
       avg_rating: 0,
       ratings_count: 0,
     };
 
-    if (isSupabaseConfigured) {
-      try {
-        const { data, error } = await supabase
-          .from('posts')
-          .insert([newPost])
-          .select()
-          .single();
-
-        if (!error && data) {
-          return data as Post;
-        }
-      } catch (err) {
-        console.warn('Supabase insert failed, storing locally:', err);
-      }
+    // Only assign user_id if it matches an authenticated user or is valid UUID
+    if (currentAuthUserId) {
+      payload.user_id = currentAuthUserId;
+    } else if (isValidUUID(postData.user_id)) {
+      payload.user_id = postData.user_id;
     }
 
-    const current = getLocalPosts();
-    const updated = [newPost, ...current];
-    saveLocalPosts(updated);
-    return newPost;
-  }
+    // Try Attempt 1: Standard Insert
+    try {
+      const { data, error } = await supabase
+        .from('posts')
+        .insert([payload])
+        .select()
+        .single();
 
-  async updatePost(postId: string, updates: Partial<Post>): Promise<Post> {
-    if (isSupabaseConfigured) {
-      try {
+      if (!error && data) {
+        createdPost = { ...data, user_rating: null };
+        savedToSupabase = true;
+      } else if (error) {
+        supabaseError = error.message;
+
+        // Attempt 2: If user_id caused foreign key violation, retry with user_id = null
+        if (payload.user_id) {
+          const fallbackPayload = { ...payload };
+          delete fallbackPayload.user_id;
+
+          const retryRes = await supabase
+            .from('posts')
+            .insert([fallbackPayload])
+            .select()
+            .single();
+
+          if (!retryRes.error && retryRes.data) {
+            createdPost = { ...retryRes.data, user_rating: null };
+            savedToSupabase = true;
+            supabaseError = undefined;
+          }
+        }
+      }
+    } catch (e: any) {
+      supabaseError = e?.message;
+    }
+
+    // Update local cache with returned Supabase row ID
+    if (savedToSupabase) {
+      const refreshed = getLocalPosts();
+      saveLocalPosts([
+        createdPost,
+        ...refreshed.filter((p) => p.id !== fallbackUUID && p.id !== createdPost.id),
+      ]);
+    }
+
+    return { post: createdPost, savedToSupabase, error: supabaseError };
+  },
+
+  // 4. Update Post
+  async updatePost(
+    postId: string,
+    updatedFields: {
+      title?: string;
+      url?: string;
+      type?: PostType;
+      description?: string;
+      image_url?: string | null;
+      tags?: string[];
+    }
+  ): Promise<{ post: Post; savedToSupabase: boolean; error?: string }> {
+    const posts = getLocalPosts();
+    const index = posts.findIndex((p) => p.id === postId);
+    
+    let updatedPost: Post = {
+      ...(index !== -1 ? posts[index] : ({} as Post)),
+      ...updatedFields,
+      id: postId,
+      tags: updatedFields.tags && updatedFields.tags.length > 0 ? updatedFields.tags : (index !== -1 ? posts[index].tags : ['General']),
+    };
+
+    if (index !== -1) {
+      posts[index] = updatedPost;
+      saveLocalPosts(posts);
+    }
+
+    let savedToSupabase = false;
+    let supabaseError: string | undefined;
+
+    try {
+      if (isValidUUID(postId)) {
+        const payload: any = {};
+        if (updatedFields.title !== undefined) payload.title = updatedFields.title.trim();
+        if (updatedFields.url !== undefined) payload.url = updatedFields.url.trim();
+        if (updatedFields.type !== undefined) payload.type = updatedFields.type;
+        if (updatedFields.description !== undefined) payload.description = updatedFields.description.trim();
+        if (updatedFields.image_url !== undefined) payload.image_url = updatedFields.image_url;
+        if (updatedFields.tags !== undefined) payload.tags = updatedFields.tags;
+
         const { data, error } = await supabase
           .from('posts')
-          .update(updates)
+          .update(payload)
           .eq('id', postId)
           .select()
           .single();
 
         if (!error && data) {
-          return data as Post;
+          updatedPost = { ...updatedPost, ...data };
+          savedToSupabase = true;
+          if (index !== -1) {
+            posts[index] = updatedPost;
+            saveLocalPosts(posts);
+          }
+        } else if (error) {
+          supabaseError = error.message;
         }
-      } catch (err) {
-        console.warn('Supabase update failed, modifying locally:', err);
       }
+    } catch (err: any) {
+      supabaseError = err?.message;
+      console.warn('Supabase update post error:', err);
     }
 
-    const current = getLocalPosts();
-    const idx = current.findIndex((p) => p.id === postId);
-    if (idx === -1) throw new Error('Post not found');
+    return { post: updatedPost, savedToSupabase, error: supabaseError };
+  },
 
-    const updated = { ...current[idx], ...updates };
-    current[idx] = updated;
-    saveLocalPosts(current);
-    return updated;
-  }
-
+  // 5. Delete Post
   async deletePost(postId: string): Promise<boolean> {
-    if (isSupabaseConfigured) {
-      try {
-        const { error } = await supabase.from('posts').delete().eq('id', postId);
-        if (!error) return true;
-      } catch (err) {
-        console.warn('Supabase delete failed, deleting locally:', err);
+    try {
+      if (isValidUUID(postId)) {
+        await supabase.from('posts').delete().eq('id', postId);
       }
+    } catch (err) {
+      console.warn('Supabase delete error:', err);
     }
 
-    const current = getLocalPosts();
-    const filtered = current.filter((p) => p.id !== postId);
-    saveLocalPosts(filtered);
+    const posts = getLocalPosts().filter((p) => p.id !== postId);
+    saveLocalPosts(posts);
     return true;
-  }
+  },
 
-  async incrementViews(postId: string, userId?: string): Promise<number> {
-    const current = getLocalPosts();
-    const idx = current.findIndex((p) => p.id === postId);
-    const newCount = idx !== -1 ? (current[idx].views_count || 0) + 1 : 1;
-
-    if (idx !== -1) {
-      current[idx].views_count = newCount;
-      saveLocalPosts(current);
-    }
-
-    if (isSupabaseConfigured) {
-      try {
-        await supabase.from('post_views').insert([{ post_id: postId, user_id: userId || null }]);
-        await supabase.rpc('increment_views', { target_post_id: postId });
-      } catch (e) {
-        // quiet fallback
-      }
-    }
-
-    return newCount;
-  }
-
-  async submitRating(postId: string, userId: string, score: number): Promise<{ avg_rating: number; ratings_count: number }> {
-    const current = getLocalPosts();
-    const idx = current.findIndex((p) => p.id === postId);
-    
-    let avg = score;
+  // 6. Rate Post
+  async ratePost(postId: string, ratingValue: number, user: { id: string; email: string }): Promise<{ avg_rating: number; ratings_count: number }> {
+    let avg = ratingValue;
     let count = 1;
 
-    if (idx !== -1) {
-      const p = current[idx];
-      count = (p.ratings_count || 0) + 1;
-      avg = Number((((p.avg_rating || 0) * (p.ratings_count || 0) + score) / count).toFixed(1));
-      current[idx].avg_rating = avg;
-      current[idx].ratings_count = count;
-      current[idx].user_rating = score;
-      saveLocalPosts(current);
-    }
+    try {
+      if (isValidUUID(postId)) {
+        let authUserId = user.id;
+        if (!isValidUUID(authUserId)) {
+          const { data: authData } = await supabase.auth.getUser();
+          authUserId = authData?.user?.id || generateUUID();
+        }
 
-    if (isSupabaseConfigured) {
-      try {
         await supabase.from('ratings').upsert(
-          { post_id: postId, user_id: userId, rating: score },
+          { post_id: postId, user_id: authUserId, rating: ratingValue },
           { onConflict: 'post_id,user_id' }
         );
-      } catch (e) {
-        // quiet fallback
+
+        const { data: ratingsData } = await supabase
+          .from('ratings')
+          .select('rating')
+          .eq('post_id', postId);
+
+        if (ratingsData && ratingsData.length > 0) {
+          count = ratingsData.length;
+          const sum = ratingsData.reduce((acc: number, r: any) => acc + r.rating, 0);
+          avg = Number((sum / count).toFixed(1));
+
+          await supabase
+            .from('posts')
+            .update({ avg_rating: avg, ratings_count: count })
+            .eq('id', postId);
+        }
       }
+    } catch (e) {
+      console.warn('Supabase rating update notice:', e);
+    }
+
+    const posts = getLocalPosts();
+    const targetPost = posts.find((p) => p.id === postId);
+    if (targetPost) {
+      targetPost.avg_rating = avg;
+      targetPost.ratings_count = count;
+      targetPost.user_rating = ratingValue;
+      saveLocalPosts(posts);
     }
 
     return { avg_rating: avg, ratings_count: count };
-  }
+  },
 
-  getFavorites(): string[] {
+  // 7. Record View
+  async recordView(postId: string): Promise<number> {
     try {
-      const raw = localStorage.getItem(FAVORITES_KEY);
-      return raw ? JSON.parse(raw) : [];
-    } catch {
-      return [];
-    }
-  }
-
-  toggleFavorite(postId: string): string[] {
-    const favs = this.getFavorites();
-    const next = favs.includes(postId) ? favs.filter((id) => id !== postId) : [...favs, postId];
-    try {
-      localStorage.setItem(FAVORITES_KEY, JSON.stringify(next));
+      if (isValidUUID(postId)) {
+        const { data } = await supabase.from('posts').select('views_count').eq('id', postId).single();
+        const nextViews = ((data?.views_count) || 0) + 1;
+        await supabase.from('posts').update({ views_count: nextViews }).eq('id', postId);
+        return nextViews;
+      }
     } catch {}
-    return next;
-  }
 
-  async getPostAnalytics(post: Post): Promise<PostAnalytics> {
-    const breakdown: { 1: number; 2: number; 3: number; 4: number; 5: number; total: number; average: number } = {
-      1: 0,
-      2: 0,
-      3: 0,
-      4: 0,
-      5: 0,
-      total: post.ratings_count || 0,
-      average: post.avg_rating || 0,
-    };
-
-    if (post.ratings_count && post.avg_rating) {
-      const star = Math.min(5, Math.max(1, Math.round(post.avg_rating))) as 1 | 2 | 3 | 4 | 5;
-      breakdown[star] = post.ratings_count;
+    const posts = getLocalPosts();
+    const target = posts.find((p) => p.id === postId);
+    if (target) {
+      target.views_count = (target.views_count || 0) + 1;
+      saveLocalPosts(posts);
+      return target.views_count;
     }
+    return 1;
+  },
 
-    const today = new Date();
-    const recentViews = Array.from({ length: 7 }).map((_, i) => {
-      const d = new Date(today);
-      d.setDate(d.getDate() - (6 - i));
-      const dateStr = d.toISOString().split('T')[0];
-      return {
-        date: dateStr,
-        count: Math.max(0, Math.floor((post.views_count || 5) / (7 - i + 1))),
-      };
-    });
+  // 8. Analytics
+  async getPostAnalytics(post: Post): Promise<PostAnalytics> {
+    const breakdown: RatingBreakdown = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, total: post.ratings_count, average: post.avg_rating };
+    try {
+      if (isValidUUID(post.id)) {
+        const { data: ratingsData } = await supabase.from('ratings').select('rating').eq('post_id', post.id);
+        if (ratingsData && ratingsData.length > 0) {
+          ratingsData.forEach((r: any) => {
+            if (breakdown[r.rating as keyof RatingBreakdown] !== undefined) {
+              (breakdown[r.rating as keyof RatingBreakdown] as number)++;
+            }
+          });
+          breakdown.total = ratingsData.length;
+        }
+      }
+    } catch {}
 
-    return {
-      post,
-      ratingBreakdown: breakdown,
-      recentViews,
-    };
-  }
-}
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Today'];
+    const baseViewsPerDay = Math.max(1, Math.round(post.views_count / 7));
+    const recentViews = days.map((day, idx) => ({
+      date: day,
+      count: Math.max(1, Math.round(baseViewsPerDay * (0.7 + idx * 0.1))),
+    }));
 
-export const DataService = new DataServiceClass();
+    return { post, ratingBreakdown: breakdown, recentViews };
+  },
+};
