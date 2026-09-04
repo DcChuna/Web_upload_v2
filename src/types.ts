@@ -55,8 +55,10 @@ export interface PostAnalytics {
 export interface UserProfile {
   id: string;
   email: string;
-  display_name: string;
+  name?: string;
+  display_name?: string;
   avatar_url?: string;
+  role?: 'admin' | 'member';
 }
 
 export type SortOption = 'latest' | 'top_rated' | 'most_viewed';
