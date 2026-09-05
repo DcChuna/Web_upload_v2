@@ -151,17 +151,14 @@ function MainApp() {
       await DataService.ratePost(postId, user.id, rating);
     } catch (err) {
       console.error('Rating failed:', err);
-      // Revert if failed
       loadPosts();
     }
   };
 
   // Open resource URL & record view increment
   const handleOpenLink = async (post: Post) => {
-    // Record view in background
     DataService.recordView(post.id, user?.id);
 
-    // Optimistic view increment
     setPosts((prev) =>
       prev.map((p) => (p.id === post.id ? { ...p, views_count: (p.views_count || 0) + 1 } : p))
     );
@@ -191,7 +188,6 @@ function MainApp() {
   // Detail Modal Trigger
   const handleOpenDetailModal = (post: Post) => {
     setDetailPost(post);
-    // Record view
     DataService.recordView(post.id, user?.id);
     setPosts((prev) =>
       prev.map((p) => (p.id === post.id ? { ...p, views_count: (p.views_count || 0) + 1 } : p))
@@ -224,7 +220,6 @@ function MainApp() {
   const filteredPosts = useMemo(() => {
     let list = [...posts];
 
-    // Search filter
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       list = list.filter((p) => {
@@ -240,17 +235,14 @@ function MainApp() {
       });
     }
 
-    // Type filter
     if (selectedType !== 'all') {
       list = list.filter((p) => p.type === selectedType);
     }
 
-    // Tag filter
     if (selectedTag !== 'all') {
       list = list.filter((p) => p.tags && p.tags.includes(selectedTag));
     }
 
-    // Sorting
     list.sort((a, b) => {
       if (sortBy === 'top_rated') {
         const ratingDiff = (b.avg_rating || 0) - (a.avg_rating || 0);
@@ -260,7 +252,6 @@ function MainApp() {
       if (sortBy === 'most_viewed') {
         return (b.views_count || 0) - (a.views_count || 0);
       }
-      // Latest (default)
       return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
     });
 
@@ -372,7 +363,6 @@ function MainApp() {
 
           {/* Right Controls: Sort & Layout */}
           <div className="flex items-center gap-2.5 self-end md:self-auto">
-            {/* Tag Selector */}
             {allTags.length > 0 && (
               <div className="relative">
                 <select
@@ -391,7 +381,6 @@ function MainApp() {
               </div>
             )}
 
-            {/* Sort Selector */}
             <div className="flex items-center gap-1 bg-zinc-900 border border-white/[0.08] p-0.5 rounded-lg text-xs text-zinc-400">
               <button
                 onClick={() => setSortBy('latest')}
@@ -427,7 +416,6 @@ function MainApp() {
               </button>
             </div>
 
-            {/* View Mode Toggle */}
             <div className="flex items-center bg-zinc-900 border border-white/[0.08] p-0.5 rounded-lg text-zinc-400">
               <button
                 onClick={() => setViewMode('grid')}
@@ -449,7 +437,6 @@ function MainApp() {
               </button>
             </div>
 
-            {/* Manual Refresh */}
             <button
               onClick={() => loadPosts(true)}
               disabled={isRefreshing}
@@ -630,10 +617,12 @@ function MainApp() {
   );
 }
 
-export default function App() {
+export function App() {
   return (
     <AuthProvider>
       <MainApp />
     </AuthProvider>
   );
 }
+
+export default App;
