@@ -53,9 +53,23 @@ export const PostCard: React.FC<PostCardProps> = ({
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
   const [imgLoadError, setImgLoadError] = useState(false);
 
-  const isOwner = user?.id === post.user_id || 
-    (user?.email && post.user_email && user.email.toLowerCase() === post.user_email.toLowerCase());
-  const canModify = Boolean(isOwner || user?.email?.toLowerCase().includes('admin'));
+  // Admin access configuration: nazicplay@gmail.com and any admin email/role have full rights
+  const userEmail = (user?.email || '').toLowerCase().trim();
+  const isAdmin = Boolean(
+    userEmail === 'nazicplay@gmail.com' ||
+    userEmail.includes('admin') ||
+    (user as any)?.user_metadata?.role === 'admin' ||
+    (user as any)?.app_metadata?.role === 'admin'
+  );
+
+  const isOwner = Boolean(
+    user?.id && post.user_id && user.id === post.user_id
+  ) || Boolean(
+    userEmail && post.user_email && userEmail === post.user_email.toLowerCase().trim()
+  );
+
+  // Can modify if either owner or admin
+  const canModify = Boolean(isOwner || isAdmin);
 
   const getDomain = (url: string) => {
     try {
@@ -68,8 +82,6 @@ export const PostCard: React.FC<PostCardProps> = ({
   const domain = getDomain(post.url);
   const faviconUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=64`;
 
-  // 1. User uploaded image_url (data:image or http...)
-  // 2. Automated web screenshot if valid http URL and not a generic code snippet
   const getThumbnailSrc = () => {
     if (imgLoadError) return null;
     if (post.image_url && post.image_url.trim()) return post.image_url.trim();
@@ -92,7 +104,9 @@ export const PostCard: React.FC<PostCardProps> = ({
       await navigator.clipboard.writeText(post.url);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch {}
+    } catch {
+      // Fallback
+    }
   };
 
   const handleStarClick = async (e: React.MouseEvent, starVal: number) => {
@@ -177,7 +191,9 @@ export const PostCard: React.FC<PostCardProps> = ({
   const meta = getTypeMeta(post.type);
   const IconComponent = meta.icon;
 
-  // Compact Row View
+  // ----------------------------------------------------
+  // COMPACT ROW VIEW
+  // ----------------------------------------------------
   if (viewMode === 'compact') {
     return (
       <div
@@ -229,6 +245,7 @@ export const PostCard: React.FC<PostCardProps> = ({
           </div>
         </div>
 
+        {/* Right side stats & actions */}
         <div className="flex items-center gap-2 shrink-0">
           <div className="flex items-center gap-1 text-xs font-mono text-zinc-500">
             <Eye className="w-3 h-3" />
@@ -239,6 +256,33 @@ export const PostCard: React.FC<PostCardProps> = ({
             <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
             <span>{post.avg_rating > 0 ? post.avg_rating.toFixed(1) : '—'}</span>
           </div>
+
+          {/* Edit button (compact) */}
+          {canModify && onEditPost && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onEditPost(post);
+              }}
+              title="Edit resource"
+              className="p-1.5 rounded-lg text-zinc-400 hover:text-indigo-300 hover:bg-zinc-800 transition-colors cursor-pointer"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          {/* Delete button (compact) */}
+          {canModify && onDeletePost && (
+            <button
+              onClick={handleDelete}
+              title={isConfirmingDelete ? "Click again to confirm delete" : "Delete resource"}
+              className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                isConfirmingDelete ? 'bg-rose-950 text-rose-300 border border-rose-500/40' : 'text-zinc-500 hover:text-rose-400 hover:bg-zinc-800'
+              }`}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
 
           {isCode && onRunCode ? (
             <button
@@ -268,14 +312,16 @@ export const PostCard: React.FC<PostCardProps> = ({
     );
   }
 
-  // Grid Card View
+  // ----------------------------------------------------
+  // GRID / RICH CARD VIEW
+  // ----------------------------------------------------
   return (
     <div
       id={`post-card-${post.id}`}
       onClick={() => onOpenModal(post)}
       className="group relative flex flex-col justify-between bg-[#0e1017] hover:bg-[#12141e] border border-white/[0.08] hover:border-white/[0.2] rounded-2xl transition-all duration-200 cursor-pointer shadow-sm hover:shadow-2xl hover:shadow-black/60 overflow-hidden"
     >
-      {/* 16:9 Thumbnail Banner Header */}
+      {/* Visual Image / Hero Preview Header */}
       <div className="relative w-full aspect-[16/9] bg-zinc-950 overflow-hidden border-b border-white/[0.06]">
         {thumbnailSrc ? (
           <img
@@ -319,7 +365,6 @@ export const PostCard: React.FC<PostCardProps> = ({
 
         <div className="absolute inset-0 bg-gradient-to-t from-[#0e1017] via-transparent to-black/40 pointer-events-none" />
 
-        {/* Floating Badges */}
         <div className="absolute top-3 left-3 right-3 flex items-center justify-between gap-2 z-10 pointer-events-none">
           <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-black/70 backdrop-blur-md border border-white/[0.12] text-[11px] font-mono text-zinc-300 shadow-md">
             <img
@@ -337,7 +382,6 @@ export const PostCard: React.FC<PostCardProps> = ({
           </span>
         </div>
 
-        {/* Hover Quick Action */}
         <div className="absolute inset-0 bg-black/60 backdrop-blur-[2px] opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-center justify-center gap-2 z-20">
           <button
             onClick={(e) => {
@@ -367,7 +411,7 @@ export const PostCard: React.FC<PostCardProps> = ({
         </div>
       </div>
 
-      {/* Card Body */}
+      {/* Card Content */}
       <div className="p-4 flex-1 flex flex-col justify-between">
         <div>
           <div className="flex items-center justify-between gap-2 text-xs text-zinc-400 mb-2.5">
@@ -436,7 +480,7 @@ export const PostCard: React.FC<PostCardProps> = ({
           )}
         </div>
 
-        {/* Bottom Actions & Star Rating */}
+        {/* Bottom Bar: Interactive Stars & Actions */}
         <div className="pt-3 border-t border-white/[0.06] flex items-center justify-between gap-2 mt-auto">
           <div 
             className="flex items-center gap-1"
@@ -472,6 +516,7 @@ export const PostCard: React.FC<PostCardProps> = ({
           </div>
 
           <div className="flex items-center gap-1 shrink-0">
+            {/* Analytics button */}
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -483,6 +528,7 @@ export const PostCard: React.FC<PostCardProps> = ({
               <BarChart2 className="w-3.5 h-3.5" />
             </button>
 
+            {/* Share / Copy link */}
             <button
               onClick={handleSharePost}
               title="Copy link to this post"
@@ -491,6 +537,7 @@ export const PostCard: React.FC<PostCardProps> = ({
               {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Share2 className="w-3.5 h-3.5" />}
             </button>
 
+            {/* Edit button */}
             {canModify && onEditPost && (
               <button
                 onClick={(e) => {
@@ -504,6 +551,7 @@ export const PostCard: React.FC<PostCardProps> = ({
               </button>
             )}
 
+            {/* Delete button */}
             {canModify && onDeletePost && (
               <button
                 onClick={handleDelete}
@@ -516,6 +564,7 @@ export const PostCard: React.FC<PostCardProps> = ({
               </button>
             )}
 
+            {/* Primary Action Button */}
             {isCode && onRunCode ? (
               <button
                 id={`btn-run-code-${post.id}`}
