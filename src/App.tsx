@@ -24,7 +24,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 // Components
 import { Header } from './components/Header';
 import { PostCard } from './components/PostCard';
-import { NewPostModal } from './components/NewPostModal';
+import { NewSubmissionModal as NewPostModal } from './components/NewSubmissionModal';
 import { AuthModal } from './components/AuthModal';
 import { AnalyticsModal } from './components/AnalyticsModal';
 import { ShareModal } from './components/ShareModal';
