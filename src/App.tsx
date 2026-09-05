@@ -1,23 +1,32 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
+  Gamepad2,
   Plus, 
   Search, 
   Filter, 
-  LayoutGrid, 
-  List, 
   FolderGit2, 
   Globe, 
   Code2, 
-  Sparkles, 
-  RefreshCw, 
-  TrendingUp, 
-  Award, 
+  LayoutGrid, 
+  List, 
   Clock, 
-  Terminal,
+  Award, 
+  TrendingUp, 
+  RefreshCw, 
+  ChevronDown,
+  Sparkles,
   ExternalLink,
-  ChevronDown
+  Star,
+  Eye,
+  Database,
+  Terminal,
+  Trophy,
+  Share2,
+  Zap,
+  HelpCircle,
+  FolderOpen
 } from 'lucide-react';
-import { Post, SortOption, FilterType, ViewMode } from './types';
+import { Post, FilterType, SortOption, ViewMode, PostType } from './types';
 import { DataService } from './lib/dataService';
 import { AuthProvider, useAuth } from './context/AuthContext';
 
@@ -29,18 +38,18 @@ import { AuthModal } from './components/AuthModal';
 import { AnalyticsModal } from './components/AnalyticsModal';
 import { ShareModal } from './components/ShareModal';
 import { LeaderboardModal } from './components/LeaderboardModal';
-import { EditSubmissionModal } from './components/EditSubmissionModal';
 import { DatabaseModal } from './components/DatabaseModal';
+import { EditSubmissionModal } from './components/EditSubmissionModal';
 import { CodeRunnerModal } from './components/CodeRunnerModal';
 
 function MainApp() {
   const { user } = useAuth();
 
-  // Primary Data State
+  // State
   const [posts, setPosts] = useState<Post[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isSupabaseLive, setIsSupabaseLive] = useState(true);
+  const [isSupabaseLive, setIsSupabaseLive] = useState(false);
   const [favorites, setFavorites] = useState<string[]>([]);
 
   // Filtering & Sorting
@@ -56,207 +65,211 @@ function MainApp() {
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState(false);
   const [isDatabaseModalOpen, setIsDatabaseModalOpen] = useState(false);
-  
-  // Selected post modals
   const [analyticsPost, setAnalyticsPost] = useState<Post | null>(null);
   const [editingPost, setEditingPost] = useState<Post | null>(null);
+  const [detailPost, setDetailPost] = useState<Post | null>(null);
 
-  // Code Runner state
+  // Interactive Code Runner Modal
   const [isCodeRunnerOpen, setIsCodeRunnerOpen] = useState(false);
-  const [codeRunnerPost, setCodeRunnerPost] = useState<Post | null>(null);
+  const [codeRunnerInitialPost, setCodeRunnerInitialPost] = useState<Post | null>(null);
 
-  // Load posts
-  const loadPosts = useCallback(async (showRefreshingSpinner = false) => {
-    if (showRefreshingSpinner) setIsRefreshing(true);
+  // Fetch posts from database
+  const loadPosts = useCallback(async (isManualRefresh = false) => {
+    if (isManualRefresh) setIsRefreshing(true);
     try {
-      const livePosts = await DataService.fetchPosts(user?.id || null);
-      setPosts(livePosts);
-      
-      const health = await DataService.checkHealth();
-      setIsSupabaseLive(health.healthy);
+      const live = await DataService.checkSupabaseConnection();
+      setIsSupabaseLive(live);
+
+      const data = await DataService.getPosts(user?.id);
+      setPosts(data);
     } catch (err) {
-      console.error('Error loading posts:', err);
+      console.error('Failed to load posts:', err);
     } finally {
       setIsLoading(false);
-      setIsRefreshing(false);
+      if (isManualRefresh) setIsRefreshing(false);
     }
   }, [user?.id]);
 
-  // Initial load & real-time subscription
   useEffect(() => {
     loadPosts();
-
-    // Subscribe to realtime database updates
-    const unsubscribe = DataService.subscribeToChanges(() => {
-      loadPosts();
-    });
-
-    return () => {
-      unsubscribe();
-    };
   }, [loadPosts]);
 
-  // Handle rating a post
-  const handleRate = async (postId: string, ratingValue: number) => {
+  // Load favorites from local storage
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('teamhub_favorites');
+      if (stored) setFavorites(JSON.parse(stored));
+    } catch (e) {}
+  }, []);
+
+  const handleToggleFavorite = (postId: string) => {
+    setFavorites((prev) => {
+      const next = prev.includes(postId) ? prev.filter((id) => id !== postId) : [...prev, postId];
+      try {
+        localStorage.setItem('teamhub_favorites', JSON.stringify(next));
+      } catch (e) {}
+      return next;
+    });
+  };
+
+  // Star Rating Handler
+  const handleRate = async (postId: string, rating: number) => {
     if (!user) {
       setIsAuthModalOpen(true);
       return;
     }
 
-    try {
-      const res = await DataService.ratePost(postId, ratingValue, {
-        id: user.id,
-        email: user.email,
-      });
+    // Optimistic UI update
+    setPosts((prev) =>
+      prev.map((p) => {
+        if (p.id !== postId) return p;
+        const currentTotal = p.ratings_count || 0;
+        const currentAvg = p.avg_rating || 0;
+        const hadRated = p.user_rating != null;
 
-      setPosts((prev) =>
-        prev.map((p) =>
-          p.id === postId
-            ? {
-                ...p,
-                avg_rating: res.avg_rating,
-                ratings_count: res.ratings_count,
-                user_rating: ratingValue,
-              }
-            : p
-        )
-      );
+        let newCount = currentTotal;
+        let newAvg = rating;
+
+        if (hadRated && currentTotal > 0) {
+          const sumWithoutOld = currentAvg * currentTotal - (p.user_rating || 0);
+          newAvg = (sumWithoutOld + rating) / currentTotal;
+        } else {
+          newCount = currentTotal + 1;
+          newAvg = (currentAvg * currentTotal + rating) / newCount;
+        }
+
+        return {
+          ...p,
+          ratings_count: newCount,
+          avg_rating: Number(newAvg.toFixed(2)),
+          user_rating: rating,
+        };
+      })
+    );
+
+    try {
+      await DataService.ratePost(postId, user.id, rating);
     } catch (err) {
-      console.error('Error submitting rating:', err);
+      console.error('Rating failed:', err);
+      // Revert if failed
+      loadPosts();
     }
   };
 
-  // Record a view and open link
+  // Open resource URL & record view increment
   const handleOpenLink = async (post: Post) => {
-    DataService.recordView(post.id).catch(() => {});
-    setPosts((prev) =>
-      prev.map((p) => (p.id === post.id ? { ...p, views_count: (p.views_count || 0) + 1 } : p))
-    );
-    window.open(post.url, '_blank', 'noopener,noreferrer');
-  };
+    // Record view in background
+    DataService.recordView(post.id, user?.id);
 
-  // Open detail / code runner modal
-  const handleOpenDetailModal = (post: Post) => {
-    DataService.recordView(post.id).catch(() => {});
+    // Optimistic view increment
     setPosts((prev) =>
       prev.map((p) => (p.id === post.id ? { ...p, views_count: (p.views_count || 0) + 1 } : p))
     );
 
-    if (post.type === 'code') {
-      setCodeRunnerPost(post);
-      setIsCodeRunnerOpen(true);
-    } else {
+    if (post.url) {
       window.open(post.url, '_blank', 'noopener,noreferrer');
     }
   };
 
-  // Open Code Runner for a specific post
+  // Run code online
   const handleRunCode = (post: Post) => {
-    DataService.recordView(post.id).catch(() => {});
-    setCodeRunnerPost(post);
+    setCodeRunnerInitialPost(post);
     setIsCodeRunnerOpen(true);
-  };
-
-  // Open general Code Runner
-  const handleOpenGeneralCodeRunner = () => {
-    setCodeRunnerPost(null);
-    setIsCodeRunnerOpen(true);
-  };
-
-  // Toggle favorite
-  const handleToggleFavorite = (postId: string) => {
-    setFavorites((prev) =>
-      prev.includes(postId) ? prev.filter((id) => id !== postId) : [...prev, postId]
-    );
   };
 
   // Delete post
   const handleDeletePost = async (post: Post) => {
-    try {
-      await DataService.deletePost(post.id);
+    const success = await DataService.deletePost(post.id);
+    if (success) {
       setPosts((prev) => prev.filter((p) => p.id !== post.id));
-    } catch (err) {
-      console.error('Failed to delete post:', err);
+      if (detailPost?.id === post.id) setDetailPost(null);
+      if (editingPost?.id === post.id) setEditingPost(null);
+      if (analyticsPost?.id === post.id) setAnalyticsPost(null);
     }
   };
 
-  // Post creation callback
-  const handlePostCreated = (newPost: Post) => {
-    setPosts((prev) => [newPost, ...prev.filter((p) => p.id !== newPost.id)]);
+  // Detail Modal Trigger
+  const handleOpenDetailModal = (post: Post) => {
+    setDetailPost(post);
+    // Record view
+    DataService.recordView(post.id, user?.id);
+    setPosts((prev) =>
+      prev.map((p) => (p.id === post.id ? { ...p, views_count: (p.views_count || 0) + 1 } : p))
+    );
   };
 
-  // Post update callback
-  const handlePostUpdated = (updatedPost: Post) => {
-    setPosts((prev) => prev.map((p) => (p.id === updatedPost.id ? updatedPost : p)));
-  };
-
-  // Extract all unique tags
+  // Compute all available tags
   const allTags = useMemo(() => {
     const tagSet = new Set<string>();
     posts.forEach((p) => {
-      if (Array.isArray(p.tags)) {
-        p.tags.forEach((t) => tagSet.add(t.trim()));
+      if (p.tags && Array.isArray(p.tags)) {
+        p.tags.forEach((t) => tagSet.add(t));
       }
     });
-    return Array.from(tagSet).filter(Boolean);
+    return Array.from(tagSet).sort();
   }, [posts]);
 
-  // Filtered and sorted posts
-  const filteredPosts = useMemo(() => {
-    return posts
-      .filter((post) => {
-        // Search query filter
-        if (searchQuery.trim()) {
-          const q = searchQuery.toLowerCase();
-          const matchTitle = post.title?.toLowerCase().includes(q);
-          const matchDesc = post.description?.toLowerCase().includes(q);
-          const matchAuthor = post.user_name?.toLowerCase().includes(q);
-          const matchTags = post.tags?.some((t) => t.toLowerCase().includes(q));
-          const matchCode = post.code_snippet?.toLowerCase().includes(q);
-          if (!matchTitle && !matchDesc && !matchAuthor && !matchTags && !matchCode) {
-            return false;
-          }
-        }
-
-        // Type filter
-        if (selectedType !== 'all' && post.type !== selectedType) {
-          return false;
-        }
-
-        // Tag filter
-        if (selectedTag !== 'all' && (!post.tags || !post.tags.includes(selectedTag))) {
-          return false;
-        }
-
-        return true;
-      })
-      .sort((a, b) => {
-        if (sortBy === 'latest') {
-          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-        }
-        if (sortBy === 'top_rated') {
-          return (b.avg_rating || 0) - (a.avg_rating || 0);
-        }
-        if (sortBy === 'most_viewed') {
-          return (b.views_count || 0) - (a.views_count || 0);
-        }
-        return 0;
-      });
-  }, [posts, searchQuery, selectedType, selectedTag, sortBy]);
-
-  // Statistics
+  // Counts per category
   const counts = useMemo(() => {
     return {
       all: posts.length,
+      game: posts.filter((p) => p.type === 'game').length,
       project: posts.filter((p) => p.type === 'project').length,
-      link: posts.filter((p) => p.type === 'link').length,
       code: posts.filter((p) => p.type === 'code').length,
+      link: posts.filter((p) => p.type === 'link').length,
     };
   }, [posts]);
 
+  // Filtered & Sorted Posts
+  const filteredPosts = useMemo(() => {
+    let list = [...posts];
+
+    // Search filter
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      list = list.filter((p) => {
+        return (
+          p.title?.toLowerCase().includes(q) ||
+          p.description?.toLowerCase().includes(q) ||
+          p.url?.toLowerCase().includes(q) ||
+          p.user_name?.toLowerCase().includes(q) ||
+          p.tags?.some((t) => t.toLowerCase().includes(q)) ||
+          p.file_name?.toLowerCase().includes(q) ||
+          p.code_language?.toLowerCase().includes(q)
+        );
+      });
+    }
+
+    // Type filter
+    if (selectedType !== 'all') {
+      list = list.filter((p) => p.type === selectedType);
+    }
+
+    // Tag filter
+    if (selectedTag !== 'all') {
+      list = list.filter((p) => p.tags && p.tags.includes(selectedTag));
+    }
+
+    // Sorting
+    list.sort((a, b) => {
+      if (sortBy === 'top_rated') {
+        const ratingDiff = (b.avg_rating || 0) - (a.avg_rating || 0);
+        if (ratingDiff !== 0) return ratingDiff;
+        return (b.ratings_count || 0) - (a.ratings_count || 0);
+      }
+      if (sortBy === 'most_viewed') {
+        return (b.views_count || 0) - (a.views_count || 0);
+      }
+      // Latest (default)
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
+
+    return list;
+  }, [posts, searchQuery, selectedType, selectedTag, sortBy]);
+
   return (
-    <div className="min-h-screen bg-[#090a0f] text-zinc-100 flex flex-col selection:bg-indigo-500/30 selection:text-indigo-200">
-      {/* App Header */}
+    <div className="min-h-screen bg-[#07080b] text-zinc-100 flex flex-col antialiased selection:bg-indigo-500 selection:text-white">
+      {/* Top Navigation Bar */}
       <Header
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
@@ -268,17 +281,19 @@ function MainApp() {
         onOpenLeaderboardModal={() => setIsLeaderboardOpen(true)}
         onOpenShareModal={() => setIsShareModalOpen(true)}
         onOpenDatabaseModal={() => setIsDatabaseModalOpen(true)}
-        onOpenCodeRunner={handleOpenGeneralCodeRunner}
+        onOpenCodeRunner={() => {
+          setCodeRunnerInitialPost(null);
+          setIsCodeRunnerOpen(true);
+        }}
         isSupabaseLive={isSupabaseLive}
         totalPosts={posts.length}
       />
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col gap-6">
-        
-        {/* Banner Bar: Category Filters & Controls */}
-        <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 pb-4 border-b border-white/[0.06]">
-          {/* Category Tabs */}
+      {/* Main Container */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-16">
+        {/* Controls Bar: Type Filters, Tag Selectors, Sorting */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-6">
+          {/* Left Type Tabs */}
           <div className="flex items-center gap-1.5 p-1 rounded-xl bg-zinc-900/90 border border-white/[0.08] overflow-x-auto">
             <button
               onClick={() => setSelectedType('all')}
@@ -291,6 +306,21 @@ function MainApp() {
               <span>All Types</span>
               <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-black/40 text-zinc-400">
                 {counts.all}
+              </span>
+            </button>
+
+            <button
+              onClick={() => setSelectedType('game')}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
+                selectedType === 'game'
+                  ? 'bg-purple-950/80 text-purple-300 border border-purple-500/30 font-semibold'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40'
+              }`}
+            >
+              <Gamepad2 className="w-3.5 h-3.5 text-purple-400" />
+              <span>Games</span>
+              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-black/40 text-zinc-400">
+                {counts.game}
               </span>
             </button>
 
@@ -523,14 +553,16 @@ function MainApp() {
             <span>—</span>
             <span>Developer Hub & Live Compiler</span>
           </div>
-          <div className="flex items-center gap-4 text-[11px]">
+          <div className="flex items-center gap-4 text-xs">
             <span className="flex items-center gap-1.5">
-              <span className={`w-1.5 h-1.5 rounded-full ${isSupabaseLive ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-              {isSupabaseLive ? 'Supabase Synchronized' : 'Offline Cache Active'}
+              <span className={`w-2 h-2 rounded-full ${isSupabaseLive ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+              <span className="text-zinc-400 font-mono text-[11px]">
+                {isSupabaseLive ? 'Supabase Synchronized' : 'Local Fallback'}
+              </span>
             </span>
             <button
               onClick={() => setIsDatabaseModalOpen(true)}
-              className="text-zinc-400 hover:text-white transition-colors cursor-pointer underline"
+              className="text-zinc-400 hover:text-indigo-400 underline decoration-white/10 underline-offset-4 cursor-pointer"
             >
               Schema / SQL
             </button>
@@ -542,7 +574,9 @@ function MainApp() {
       <NewPostModal
         isOpen={isNewPostOpen}
         onClose={() => setIsNewPostOpen(false)}
-        onPostCreated={handlePostCreated}
+        onPostCreated={(newPost) => {
+          setPosts((prev) => [newPost, ...prev]);
+        }}
       />
 
       <AuthModal
@@ -552,56 +586,54 @@ function MainApp() {
 
       <AnalyticsModal
         post={analyticsPost}
+        isOpen={Boolean(analyticsPost)}
         onClose={() => setAnalyticsPost(null)}
+        onOpenLink={handleOpenLink}
       />
 
       <ShareModal
         isOpen={isShareModalOpen}
         onClose={() => setIsShareModalOpen(false)}
-        postCount={posts.length}
+        totalPosts={posts.length}
       />
 
       <LeaderboardModal
         isOpen={isLeaderboardOpen}
         onClose={() => setIsLeaderboardOpen(false)}
         posts={posts}
+        onOpenLink={handleOpenLink}
+        onOpenAnalytics={(p) => setAnalyticsPost(p)}
       />
 
       {editingPost && (
         <EditSubmissionModal
-          post={editingPost}
           isOpen={Boolean(editingPost)}
+          post={editingPost}
           onClose={() => setEditingPost(null)}
-          onPostUpdated={handlePostUpdated}
+          onPostUpdated={(updated) => {
+            setPosts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+            setEditingPost(null);
+          }}
         />
       )}
 
-      <DatabaseModal
-        isOpen={isDatabaseModalOpen}
-        onClose={() => setIsDatabaseModalOpen(false)}
-        isLive={isSupabaseLive}
-        onRefresh={loadPosts}
-      />
-
+      {/* Interactive Code Runner Modal */}
       <CodeRunnerModal
         isOpen={isCodeRunnerOpen}
         onClose={() => {
           setIsCodeRunnerOpen(false);
-          setCodeRunnerPost(null);
+          setCodeRunnerInitialPost(null);
         }}
-        initialPost={codeRunnerPost}
-        onPostCreated={handlePostCreated}
+        initialPost={codeRunnerInitialPost}
       />
     </div>
   );
 }
 
-export function App() {
+export default function App() {
   return (
     <AuthProvider>
       <MainApp />
     </AuthProvider>
   );
 }
-
-export default App;
