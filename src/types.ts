@@ -1,4 +1,4 @@
-export type PostType = 'project' | 'link' | 'code';
+export type PostType = 'game' | 'project' | 'link' | 'code';
 
 export interface Post {
   id: string;
@@ -55,14 +55,12 @@ export interface PostAnalytics {
 export interface UserProfile {
   id: string;
   email: string;
-  name?: string;
-  display_name?: string;
+  display_name: string;
   avatar_url?: string;
-  role?: 'admin' | 'member';
 }
 
 export type SortOption = 'latest' | 'top_rated' | 'most_viewed';
-export type FilterType = 'all' | 'project' | 'link' | 'code';
+export type FilterType = 'all' | 'game' | 'project' | 'link' | 'code';
 export type ViewMode = 'grid' | 'compact';
 
 export type SupportedLanguage = 
