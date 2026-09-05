@@ -1,40 +1,45 @@
 import { supabase } from './supabase';
-import { Post, PostAnalytics, RatingBreakdown, PostType } from '../types';
-import { MOCK_POSTS } from './mockSeedData';
+import { Post, Rating, RatingBreakdown, PostAnalytics, PostType } from '../types';
 
-const LOCAL_STORAGE_KEY = 'teamhub_posts_cache';
+const LOCAL_STORAGE_KEY_POSTS = 'teamhub_posts_v1';
+const LOCAL_STORAGE_KEY_RATINGS = 'teamhub_ratings_v1';
 
-const generateUUID = () => {
+function generateUUID(): string {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID();
+    try {
+      return crypto.randomUUID();
+    } catch {}
   }
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
     const r = (Math.random() * 16) | 0;
     const v = c === 'x' ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
-};
+}
 
-const isValidUUID = (str: string | null | undefined): boolean => {
+const isValidUUID = (str?: string | null): boolean => {
   if (!str) return false;
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(str);
 };
 
-const getLocalPosts = (): Post[] => {
+export function getLocalPosts(): Post[] {
   try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY_POSTS);
     if (!raw) return [];
-    return JSON.parse(raw);
-  } catch (e) {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
     return [];
   }
-};
+}
 
-const saveLocalPosts = (posts: Post[]) => {
+export function saveLocalPosts(posts: Post[]) {
   try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts));
-  } catch (e) {}
-};
+    localStorage.setItem(LOCAL_STORAGE_KEY_POSTS, JSON.stringify(posts));
+  } catch (err) {
+    console.warn('Local storage write error:', err);
+  }
+}
 
 export const DataService = {
   // Check health of connection
@@ -50,7 +55,6 @@ export const DataService = {
     }
   },
 
-  // Alias for compatibility
   async checkSupabaseConnection(): Promise<boolean> {
     try {
       const { error } = await supabase.from('posts').select('id').limit(1);
@@ -64,14 +68,18 @@ export const DataService = {
     return true;
   },
 
-  // Realtime subscription helper
+  // Realtime subscription for instant multi-user synchronization
   subscribeToChanges(onUpdate: () => void): () => void {
     try {
       const channel = supabase
-        .channel('schema-db-changes')
+        .channel('public:posts-realtime')
         .on(
           'postgres_changes',
-          { event: '*', schema: 'public', table: 'posts' },
+          {
+            event: '*',
+            schema: 'public',
+            table: 'posts',
+          },
           () => {
             onUpdate();
           }
@@ -81,14 +89,14 @@ export const DataService = {
       return () => {
         try {
           supabase.removeChannel(channel);
-        } catch (e) {}
+        } catch {}
       };
-    } catch (e) {
+    } catch {
       return () => {};
     }
   },
 
-  // 1. Fetch all posts
+  // 1. Fetch Posts: Supabase is the single source of truth when online
   async fetchPosts(currentUserId?: string | null): Promise<Post[]> {
     try {
       const { data: supabaseData, error } = await supabase
@@ -97,59 +105,59 @@ export const DataService = {
         .order('created_at', { ascending: false });
 
       if (!error && Array.isArray(supabaseData)) {
-        let ratingMap = new Map<string, number>();
+        // Authoritative data from Supabase
+        const livePosts: Post[] = supabaseData.map((p: any) => ({
+          id: p.id,
+          created_at: p.created_at || new Date().toISOString(),
+          title: p.title,
+          url: p.url,
+          type: (p.type || 'project') as PostType,
+          description: p.description || '',
+          image_url: p.image_url || null,
+          tags: Array.isArray(p.tags) ? p.tags : ['General'],
+          user_id: p.user_id || 'anonymous',
+          user_email: p.user_email || 'admin@gmail.com',
+          user_name: p.user_name || 'Admin',
+          views_count: Number(p.views_count) || 0,
+          avg_rating: Number(p.avg_rating) || 0,
+          ratings_count: Number(p.ratings_count) || 0,
+          user_rating: null,
+          code_snippet: p.code_snippet || undefined,
+          code_language: p.code_language || undefined,
+          file_name: p.file_name || undefined,
+        }));
 
+        // Fetch user ratings if user ID is provided
         if (currentUserId && isValidUUID(currentUserId)) {
-          const { data: userRatings } = await supabase
-            .from('ratings')
-            .select('post_id, rating')
-            .eq('user_id', currentUserId);
+          try {
+            const { data: userRatings } = await supabase
+              .from('ratings')
+              .select('post_id, rating')
+              .eq('user_id', currentUserId);
 
-          if (userRatings && userRatings.length > 0) {
-            userRatings.forEach((r: any) => ratingMap.set(r.post_id, r.rating));
-          }
+            if (userRatings && userRatings.length > 0) {
+              const ratingMap = new Map<string, number>();
+              userRatings.forEach((r: any) => ratingMap.set(r.post_id, r.rating));
+              livePosts.forEach((post) => {
+                if (ratingMap.has(post.id)) {
+                  post.user_rating = ratingMap.get(post.id) || null;
+                }
+              });
+            }
+          } catch {}
         }
 
-        const livePosts: Post[] = supabaseData.map((post: any) => {
-          let userRating: number | undefined = undefined;
-          if (ratingMap.has(post.id)) {
-            userRating = ratingMap.get(post.id);
-          }
-
-          return {
-            id: post.id,
-            title: post.title,
-            description: post.description || '',
-            url: post.url,
-            type: post.type || 'link',
-            image_url: post.image_url || undefined,
-            user_id: post.user_id || undefined,
-            user_name: post.user_name || 'Team Member',
-            user_email: post.user_email || undefined,
-            views_count: Number(post.views_count) || 0,
-            avg_rating: Number(post.avg_rating) || 0,
-            ratings_count: Number(post.ratings_count) || 0,
-            tags: Array.isArray(post.tags) ? post.tags : [],
-            created_at: post.created_at,
-            user_rating: userRating,
-            code_snippet: post.code_snippet || undefined,
-            code_language: post.code_language || undefined,
-            file_name: post.file_name || undefined,
-          };
-        });
-
+        // Keep local cache completely in sync with Supabase
         saveLocalPosts(livePosts);
         return livePosts;
+      } else if (error) {
+        console.warn('Supabase fetch error, falling back to cache:', error.message);
       }
     } catch (err) {
-      console.warn('Supabase fetch failed, falling back to cached local storage:', err);
+      console.warn('Supabase fetch network error, falling back to cache:', err);
     }
 
-    const cached = getLocalPosts();
-    if (cached && cached.length > 0) {
-      return cached;
-    }
-
+    // Offline fallback only when Supabase cannot be reached
     return getLocalPosts();
   },
 
@@ -161,161 +169,179 @@ export const DataService = {
   async uploadImage(file: File): Promise<string> {
     try {
       const fileExt = file.name.split('.').pop() || 'png';
-      const fileName = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}.${fileExt}`;
-      const filePath = `uploads/${fileName}`;
+      const cleanFileName = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}.${fileExt}`;
+      const filePath = `uploads/${cleanFileName}`;
 
       const { data, error } = await supabase.storage
-        .from('post-images')
-        .upload(filePath, file, { cacheControl: '3600', upsert: false });
+        .from('project-images')
+        .upload(filePath, file, { cacheControl: '3600', upsert: true });
 
       if (!error && data) {
         const { data: publicUrlData } = supabase.storage
-          .from('post-images')
+          .from('project-images')
           .getPublicUrl(filePath);
-
         if (publicUrlData?.publicUrl) return publicUrlData.publicUrl;
       }
     } catch (err) {
-      console.warn('Storage upload error, converting to base64 inline representation:', err);
+      console.warn('Supabase storage upload error:', err);
     }
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = (e) => reject(e);
+      reader.onloadend = () => resolve(reader.result as string);
       reader.readAsDataURL(file);
     });
   },
 
-  // 3. Create a post
-  async createPost(
-    postData: {
-      title: string;
-      description?: string;
-      url: string;
-      type: PostType;
-      image_url?: string;
-      tags?: string[];
-      code_snippet?: string;
-      code_language?: string;
-      file_name?: string;
-    },
-    userContext?: { id?: string; email?: string; name?: string }
-  ): Promise<Post> {
-    const newPostId = generateUUID();
-    const createdPost: Post = {
-      id: newPostId,
+  // 3. Create Post
+  async createPost(postData: {
+    title: string;
+    url: string;
+    type: PostType;
+    description: string;
+    image_url?: string | null;
+    tags: string[];
+    user_id: string;
+    user_email: string;
+    user_name: string;
+    code_snippet?: string;
+    code_language?: string;
+    file_name?: string;
+  }): Promise<{ post: Post; savedToSupabase: boolean; error?: string }> {
+    const fallbackUUID = generateUUID();
+    const nowIso = new Date().toISOString();
+
+    let createdPost: Post = {
+      id: fallbackUUID,
+      created_at: nowIso,
       title: postData.title.trim(),
-      description: postData.description?.trim() || '',
       url: postData.url.trim(),
       type: postData.type,
-      image_url: postData.image_url || undefined,
-      user_id: userContext?.id || undefined,
-      user_name: userContext?.name || userContext?.email?.split('@')[0] || 'Team Member',
-      user_email: userContext?.email || undefined,
+      description: (postData.description || '').trim(),
+      image_url: postData.image_url || null,
+      tags: postData.tags && postData.tags.length > 0 ? postData.tags : ['General'],
+      user_id: postData.user_id || 'admin-user',
+      user_email: postData.user_email || 'admin@gmail.com',
+      user_name: postData.user_name || 'Admin',
       views_count: 0,
       avg_rating: 0,
       ratings_count: 0,
-      tags: postData.tags || [],
-      created_at: new Date().toISOString(),
+      user_rating: null,
       code_snippet: postData.code_snippet,
       code_language: postData.code_language,
       file_name: postData.file_name,
     };
 
+    // Save to local cache first
     const current = getLocalPosts();
     saveLocalPosts([createdPost, ...current.filter((p) => p.id !== createdPost.id)]);
 
+    let savedToSupabase = false;
+    let supabaseError: string | undefined;
+
+    // Check if session has a valid Supabase authenticated user ID
+    let currentAuthUserId: string | null = null;
     try {
-      let currentAuthUserId: string | null = null;
-      try {
-        const { data: authData } = await supabase.auth.getUser();
-        if (authData?.user?.id) {
-          currentAuthUserId = authData.user.id;
-        }
-      } catch (e) {}
-
-      const payload: any = {
-        id: newPostId,
-        title: createdPost.title,
-        description: createdPost.description,
-        url: createdPost.url,
-        type: createdPost.type,
-        image_url: createdPost.image_url || null,
-        user_name: createdPost.user_name,
-        user_email: createdPost.user_email || null,
-        views_count: 0,
-        avg_rating: 0,
-        ratings_count: 0,
-        tags: createdPost.tags,
-        created_at: createdPost.created_at,
-        code_snippet: createdPost.code_snippet || null,
-        code_language: createdPost.code_language || null,
-        file_name: createdPost.file_name || null,
-      };
-
-      if (currentAuthUserId) {
-        payload.user_id = currentAuthUserId;
-      } else if (userContext?.id && isValidUUID(userContext.id)) {
-        payload.user_id = userContext.id;
+      const { data: authData } = await supabase.auth.getUser();
+      if (authData?.user?.id) {
+        currentAuthUserId = authData.user.id;
       }
+    } catch {}
 
+    const payload: any = {
+      title: createdPost.title,
+      url: createdPost.url,
+      type: createdPost.type,
+      description: createdPost.description,
+      image_url: createdPost.image_url,
+      tags: createdPost.tags,
+      user_email: createdPost.user_email,
+      user_name: createdPost.user_name,
+      views_count: 0,
+      avg_rating: 0,
+      ratings_count: 0,
+    };
+
+    if (currentAuthUserId) {
+      payload.user_id = currentAuthUserId;
+    } else if (isValidUUID(postData.user_id)) {
+      payload.user_id = postData.user_id;
+    }
+
+    try {
       const { data, error } = await supabase
         .from('posts')
         .insert([payload])
         .select()
         .single();
 
-      let savedToSupabase = false;
-
       if (!error && data) {
+        createdPost = { ...data, user_rating: null };
         savedToSupabase = true;
       } else if (error) {
-        console.warn('Initial insert error:', error.message);
+        supabaseError = error.message;
+
         if (payload.user_id) {
-          delete payload.user_id;
+          const fallbackPayload = { ...payload };
+          delete fallbackPayload.user_id;
+
           const retryRes = await supabase
             .from('posts')
-            .insert([payload])
+            .insert([fallbackPayload])
             .select()
             .single();
 
           if (!retryRes.error && retryRes.data) {
+            createdPost = { ...retryRes.data, user_rating: null };
             savedToSupabase = true;
-          } else {
-            console.error('Retry insert also failed:', retryRes.error);
+            supabaseError = undefined;
           }
         }
       }
-
-      if (savedToSupabase) {
-        const refreshed = getLocalPosts();
-        saveLocalPosts([
-          createdPost,
-          ...refreshed.filter((p) => p.id !== createdPost.id),
-        ]);
-      }
-    } catch (e) {
-      console.warn('Network exception while saving post to Supabase:', e);
+    } catch (e: any) {
+      supabaseError = e?.message;
     }
 
-    return createdPost;
+    if (savedToSupabase) {
+      const refreshed = getLocalPosts();
+      saveLocalPosts([
+        createdPost,
+        ...refreshed.filter((p) => p.id !== fallbackUUID && p.id !== createdPost.id),
+      ]);
+    }
+
+    return { post: createdPost, savedToSupabase, error: supabaseError };
   },
 
   // 4. Update Post
   async updatePost(
     postId: string,
-    updatedFields: Partial<Post>
-  ): Promise<Post | null> {
+    updatedFields: {
+      title?: string;
+      url?: string;
+      type?: PostType;
+      description?: string;
+      image_url?: string | null;
+      tags?: string[];
+    }
+  ): Promise<{ post: Post; savedToSupabase: boolean; error?: string }> {
     const posts = getLocalPosts();
     const index = posts.findIndex((p) => p.id === postId);
-    let updatedLocalPost: Post | null = null;
+    
+    let updatedPost: Post = {
+      ...(index !== -1 ? posts[index] : ({} as Post)),
+      ...updatedFields,
+      id: postId,
+      tags: updatedFields.tags && updatedFields.tags.length > 0 ? updatedFields.tags : (index !== -1 ? posts[index].tags : ['General']),
+    };
 
     if (index !== -1) {
-      posts[index] = { ...posts[index], ...updatedFields };
+      posts[index] = updatedPost;
       saveLocalPosts(posts);
-      updatedLocalPost = posts[index];
     }
+
+    let savedToSupabase = false;
+    let supabaseError: string | undefined;
 
     try {
       if (isValidUUID(postId)) {
@@ -326,9 +352,6 @@ export const DataService = {
         if (updatedFields.description !== undefined) payload.description = updatedFields.description.trim();
         if (updatedFields.image_url !== undefined) payload.image_url = updatedFields.image_url;
         if (updatedFields.tags !== undefined) payload.tags = updatedFields.tags;
-        if (updatedFields.code_snippet !== undefined) payload.code_snippet = updatedFields.code_snippet;
-        if (updatedFields.code_language !== undefined) payload.code_language = updatedFields.code_language;
-        if (updatedFields.file_name !== undefined) payload.file_name = updatedFields.file_name;
 
         const { data, error } = await supabase
           .from('posts')
@@ -338,32 +361,32 @@ export const DataService = {
           .single();
 
         if (!error && data) {
-          const posts = getLocalPosts();
-          const index = posts.findIndex((p) => p.id === postId);
+          updatedPost = { ...updatedPost, ...data };
+          savedToSupabase = true;
           if (index !== -1) {
-            posts[index] = { ...posts[index], ...data };
+            posts[index] = updatedPost;
             saveLocalPosts(posts);
-            return posts[index];
           }
+        } else if (error) {
+          supabaseError = error.message;
         }
       }
-    } catch (e) {
-      console.warn('Supabase post update failed, local copy maintained:', e);
+    } catch (err: any) {
+      supabaseError = err?.message;
+      console.warn('Supabase update post error:', err);
     }
 
-    return updatedLocalPost;
+    return { post: updatedPost, savedToSupabase, error: supabaseError };
   },
 
-  // 5. Delete a post
+  // 5. Delete Post
   async deletePost(postId: string): Promise<boolean> {
     try {
       if (isValidUUID(postId)) {
-        await supabase.from('ratings').delete().eq('post_id', postId);
-        await supabase.from('views').delete().eq('post_id', postId);
         await supabase.from('posts').delete().eq('id', postId);
       }
-    } catch (e) {
-      console.warn('Supabase delete failed:', e);
+    } catch (err) {
+      console.warn('Supabase delete error:', err);
     }
 
     const posts = getLocalPosts().filter((p) => p.id !== postId);
@@ -371,113 +394,101 @@ export const DataService = {
     return true;
   },
 
-  // 6. Rate a post
-  async ratePost(
-    postId: string,
-    rating: number,
-    userContext?: { id?: string; email?: string }
-  ): Promise<{ avg_rating: number; ratings_count: number }> {
+  // 6. Rate Post
+  async ratePost(postId: string, ratingValue: number, user: { id: string; email: string }): Promise<{ avg_rating: number; ratings_count: number }> {
+    let avg = ratingValue;
+    let count = 1;
+
     try {
       if (isValidUUID(postId)) {
-        let authUserId = userContext?.id;
+        let authUserId = user.id;
         if (!isValidUUID(authUserId)) {
           const { data: authData } = await supabase.auth.getUser();
-          authUserId = authData?.user?.id;
+          authUserId = authData?.user?.id || generateUUID();
         }
 
-        if (isValidUUID(authUserId)) {
-          await supabase.from('ratings').upsert(
-            {
-              post_id: postId,
-              user_id: authUserId,
-              rating,
-              created_at: new Date().toISOString(),
-            },
-            { onConflict: 'post_id,user_id' }
-          );
+        await supabase.from('ratings').upsert(
+          { post_id: postId, user_id: authUserId, rating: ratingValue },
+          { onConflict: 'post_id,user_id' }
+        );
 
-          const { data: ratingsData } = await supabase
-            .from('ratings')
-            .select('rating')
-            .eq('post_id', postId);
+        const { data: ratingsData } = await supabase
+          .from('ratings')
+          .select('rating')
+          .eq('post_id', postId);
 
-          if (ratingsData && ratingsData.length > 0) {
-            const count = ratingsData.length;
-            const sum = ratingsData.reduce((acc, curr) => acc + curr.rating, 0);
-            const avg = Number((sum / count).toFixed(2));
+        if (ratingsData && ratingsData.length > 0) {
+          count = ratingsData.length;
+          const sum = ratingsData.reduce((acc: number, r: any) => acc + r.rating, 0);
+          avg = Number((sum / count).toFixed(1));
 
-            await supabase
-              .from('posts')
-              .update({ avg_rating: avg, ratings_count: count })
-              .eq('id', postId);
-
-            return { avg_rating: avg, ratings_count: count };
-          }
+          await supabase
+            .from('posts')
+            .update({ avg_rating: avg, ratings_count: count })
+            .eq('id', postId);
         }
       }
     } catch (e) {
-      console.warn('Supabase rating failed, saving in memory:', e);
+      console.warn('Supabase rating update notice:', e);
     }
 
     const posts = getLocalPosts();
     const targetPost = posts.find((p) => p.id === postId);
     if (targetPost) {
-      targetPost.ratings_count = (targetPost.ratings_count || 0) + 1;
-      targetPost.avg_rating = Number(
-        (((targetPost.avg_rating || 0) + rating) / 2).toFixed(1)
-      );
+      targetPost.avg_rating = avg;
+      targetPost.ratings_count = count;
+      targetPost.user_rating = ratingValue;
       saveLocalPosts(posts);
-      return {
-        avg_rating: targetPost.avg_rating,
-        ratings_count: targetPost.ratings_count,
-      };
     }
 
-    return { avg_rating: rating, ratings_count: 1 };
+    return { avg_rating: avg, ratings_count: count };
   },
 
-  // 7. Record a view
-  async recordView(postId: string): Promise<void> {
+  // 7. Record View
+  async recordView(postId: string): Promise<number> {
     try {
       if (isValidUUID(postId)) {
-        await supabase.rpc('increment_view_count', { target_post_id: postId });
+        const { data } = await supabase.from('posts').select('views_count').eq('id', postId).single();
+        const nextViews = ((data?.views_count) || 0) + 1;
+        await supabase.from('posts').update({ views_count: nextViews }).eq('id', postId);
+        return nextViews;
       }
-    } catch (e) {}
+    } catch {}
 
     const posts = getLocalPosts();
     const target = posts.find((p) => p.id === postId);
     if (target) {
       target.views_count = (target.views_count || 0) + 1;
       saveLocalPosts(posts);
+      return target.views_count;
     }
+    return 1;
   },
 
-  // 8. Fetch analytics
+  // 8. Analytics
   async getPostAnalytics(post: Post): Promise<PostAnalytics> {
-    const breakdown: RatingBreakdown = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-
+    const breakdown: RatingBreakdown = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, total: post.ratings_count, average: post.avg_rating };
     try {
       if (isValidUUID(post.id)) {
-        const { data: ratingsData } = await supabase
-          .from('ratings')
-          .select('rating')
-          .eq('post_id', post.id);
-
+        const { data: ratingsData } = await supabase.from('ratings').select('rating').eq('post_id', post.id);
         if (ratingsData && ratingsData.length > 0) {
           ratingsData.forEach((r: any) => {
             if (breakdown[r.rating as keyof RatingBreakdown] !== undefined) {
-              breakdown[r.rating as keyof RatingBreakdown]++;
+              (breakdown[r.rating as keyof RatingBreakdown] as number)++;
             }
           });
+          breakdown.total = ratingsData.length;
         }
       }
-    } catch (e) {}
+    } catch {}
 
-    return {
-      views: post.views_count,
-      ratings_count: post.ratings_count,
-      avg_rating: post.avg_rating,
-      rating_breakdown: breakdown,
-    };
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Today'];
+    const baseViewsPerDay = Math.max(1, Math.round(post.views_count / 7));
+    const recentViews = days.map((day, idx) => ({
+      date: day,
+      count: Math.max(1, Math.round(baseViewsPerDay * (0.7 + idx * 0.1))),
+    }));
+
+    return { post, ratingBreakdown: breakdown, recentViews };
   },
 };
