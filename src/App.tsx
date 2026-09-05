@@ -4,36 +4,28 @@ import {
   Plus, 
   Search, 
   Filter, 
+  LayoutGrid, 
+  List, 
   FolderGit2, 
   Globe, 
   Code2, 
-  LayoutGrid, 
-  List, 
-  Clock, 
-  Award, 
-  TrendingUp, 
+  Sparkles, 
   RefreshCw, 
-  ChevronDown,
-  Sparkles,
-  ExternalLink,
-  Star,
-  Eye,
-  Database,
+  TrendingUp, 
+  Award, 
+  Clock, 
   Terminal,
-  Trophy,
-  Share2,
-  Zap,
-  HelpCircle,
-  FolderOpen
+  ExternalLink,
+  ChevronDown
 } from 'lucide-react';
-import { Post, FilterType, SortOption, ViewMode, PostType } from './types';
+import { Post, SortOption, FilterType, ViewMode } from './types';
 import { DataService } from './lib/dataService';
 import { AuthProvider, useAuth } from './context/AuthContext';
 
 // Components
 import { Header } from './components/Header';
 import { PostCard } from './components/PostCard';
-import { NewSubmissionModal as NewPostModal } from './components/NewSubmissionModal';
+import { NewSubmissionModal } from './components/NewSubmissionModal';
 import { AuthModal } from './components/AuthModal';
 import { AnalyticsModal } from './components/AnalyticsModal';
 import { ShareModal } from './components/ShareModal';
@@ -65,147 +57,195 @@ function MainApp() {
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [isLeaderboardOpen, setIsLeaderboardOpen] = useState(false);
   const [isDatabaseModalOpen, setIsDatabaseModalOpen] = useState(false);
+  
+  // Selected post modals
   const [analyticsPost, setAnalyticsPost] = useState<Post | null>(null);
   const [editingPost, setEditingPost] = useState<Post | null>(null);
-  const [detailPost, setDetailPost] = useState<Post | null>(null);
 
-  // Interactive Code Runner Modal
+  // Code Runner state
   const [isCodeRunnerOpen, setIsCodeRunnerOpen] = useState(false);
-  const [codeRunnerInitialPost, setCodeRunnerInitialPost] = useState<Post | null>(null);
+  const [codeRunnerPost, setCodeRunnerPost] = useState<Post | null>(null);
 
-  // Fetch posts from database
-  const loadPosts = useCallback(async (isManualRefresh = false) => {
-    if (isManualRefresh) setIsRefreshing(true);
+  // Load posts directly from database
+  const loadPosts = useCallback(async (showRefreshingSpinner = false) => {
+    if (showRefreshingSpinner) setIsRefreshing(true);
     try {
-      const live = await DataService.checkSupabaseConnection();
-      setIsSupabaseLive(live);
-
-      const data = await DataService.getPosts(user?.id);
-      setPosts(data);
+      const livePosts = await DataService.fetchPosts(user?.id || null);
+      setPosts(livePosts);
+      
+      const health = await DataService.checkHealth();
+      setIsSupabaseLive(health.healthy);
     } catch (err) {
-      console.error('Failed to load posts:', err);
+      console.error('Error loading posts:', err);
     } finally {
       setIsLoading(false);
-      if (isManualRefresh) setIsRefreshing(false);
+      setIsRefreshing(false);
     }
   }, [user?.id]);
 
+  // Initial load & real-time subscription
   useEffect(() => {
     loadPosts();
+
+    // Subscribe to realtime database updates
+    const unsubscribe = DataService.subscribeToChanges(() => {
+      loadPosts();
+    });
+
+    return () => {
+      unsubscribe();
+    };
   }, [loadPosts]);
 
-  // Load favorites from local storage
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem('teamhub_favorites');
-      if (stored) setFavorites(JSON.parse(stored));
-    } catch (e) {}
-  }, []);
-
-  const handleToggleFavorite = (postId: string) => {
-    setFavorites((prev) => {
-      const next = prev.includes(postId) ? prev.filter((id) => id !== postId) : [...prev, postId];
-      try {
-        localStorage.setItem('teamhub_favorites', JSON.stringify(next));
-      } catch (e) {}
-      return next;
-    });
-  };
-
-  // Star Rating Handler
-  const handleRate = async (postId: string, rating: number) => {
+  // Handle rating a post
+  const handleRate = async (postId: string, ratingValue: number) => {
     if (!user) {
       setIsAuthModalOpen(true);
       return;
     }
 
-    // Optimistic UI update
-    setPosts((prev) =>
-      prev.map((p) => {
-        if (p.id !== postId) return p;
-        const currentTotal = p.ratings_count || 0;
-        const currentAvg = p.avg_rating || 0;
-        const hadRated = p.user_rating != null;
-
-        let newCount = currentTotal;
-        let newAvg = rating;
-
-        if (hadRated && currentTotal > 0) {
-          const sumWithoutOld = currentAvg * currentTotal - (p.user_rating || 0);
-          newAvg = (sumWithoutOld + rating) / currentTotal;
-        } else {
-          newCount = currentTotal + 1;
-          newAvg = (currentAvg * currentTotal + rating) / newCount;
-        }
-
-        return {
-          ...p,
-          ratings_count: newCount,
-          avg_rating: Number(newAvg.toFixed(2)),
-          user_rating: rating,
-        };
-      })
-    );
-
     try {
-      await DataService.ratePost(postId, user.id, rating);
+      const res = await DataService.ratePost(postId, ratingValue, {
+        id: user.id,
+        email: user.email,
+      });
+
+      setPosts((prev) =>
+        prev.map((p) =>
+          p.id === postId
+            ? {
+                ...p,
+                avg_rating: res.avg_rating,
+                ratings_count: res.ratings_count,
+                user_rating: ratingValue,
+              }
+            : p
+        )
+      );
     } catch (err) {
-      console.error('Rating failed:', err);
-      loadPosts();
+      console.error('Error submitting rating:', err);
     }
   };
 
-  // Open resource URL & record view increment
+  // Record a view and open link
   const handleOpenLink = async (post: Post) => {
-    DataService.recordView(post.id, user?.id);
+    DataService.recordView(post.id).catch(() => {});
+    setPosts((prev) =>
+      prev.map((p) => (p.id === post.id ? { ...p, views_count: (p.views_count || 0) + 1 } : p))
+    );
+    window.open(post.url, '_blank', 'noopener,noreferrer');
+  };
 
+  // Open detail / code runner modal
+  const handleOpenDetailModal = (post: Post) => {
+    DataService.recordView(post.id).catch(() => {});
     setPosts((prev) =>
       prev.map((p) => (p.id === post.id ? { ...p, views_count: (p.views_count || 0) + 1 } : p))
     );
 
-    if (post.url) {
+    if (post.type === 'code') {
+      setCodeRunnerPost(post);
+      setIsCodeRunnerOpen(true);
+    } else {
       window.open(post.url, '_blank', 'noopener,noreferrer');
     }
   };
 
-  // Run code online
+  // Open Code Runner for a specific post
   const handleRunCode = (post: Post) => {
-    setCodeRunnerInitialPost(post);
+    DataService.recordView(post.id).catch(() => {});
+    setCodeRunnerPost(post);
     setIsCodeRunnerOpen(true);
+  };
+
+  // Open general Code Runner
+  const handleOpenGeneralCodeRunner = () => {
+    setCodeRunnerPost(null);
+    setIsCodeRunnerOpen(true);
+  };
+
+  // Toggle favorite
+  const handleToggleFavorite = (postId: string) => {
+    setFavorites((prev) =>
+      prev.includes(postId) ? prev.filter((id) => id !== postId) : [...prev, postId]
+    );
   };
 
   // Delete post
   const handleDeletePost = async (post: Post) => {
-    const success = await DataService.deletePost(post.id);
-    if (success) {
+    try {
+      await DataService.deletePost(post.id);
       setPosts((prev) => prev.filter((p) => p.id !== post.id));
-      if (detailPost?.id === post.id) setDetailPost(null);
-      if (editingPost?.id === post.id) setEditingPost(null);
-      if (analyticsPost?.id === post.id) setAnalyticsPost(null);
+    } catch (err) {
+      console.error('Failed to delete post:', err);
     }
   };
 
-  // Detail Modal Trigger
-  const handleOpenDetailModal = (post: Post) => {
-    setDetailPost(post);
-    DataService.recordView(post.id, user?.id);
-    setPosts((prev) =>
-      prev.map((p) => (p.id === post.id ? { ...p, views_count: (p.views_count || 0) + 1 } : p))
-    );
+  // Post creation callback
+  const handlePostCreated = (newPost: Post) => {
+    setPosts((prev) => [newPost, ...prev.filter((p) => p.id !== newPost.id)]);
   };
 
-  // Compute all available tags
+  // Post update callback
+  const handlePostUpdated = (updatedPost: Post) => {
+    setPosts((prev) => prev.map((p) => (p.id === updatedPost.id ? updatedPost : p)));
+  };
+
+  // Extract all unique tags
   const allTags = useMemo(() => {
     const tagSet = new Set<string>();
     posts.forEach((p) => {
-      if (p.tags && Array.isArray(p.tags)) {
-        p.tags.forEach((t) => tagSet.add(t));
+      if (Array.isArray(p.tags)) {
+        p.tags.forEach((t) => tagSet.add(t.trim()));
       }
     });
-    return Array.from(tagSet).sort();
+    return Array.from(tagSet).filter(Boolean);
   }, [posts]);
 
-  // Counts per category
+  // Filtered and sorted posts
+  const filteredPosts = useMemo(() => {
+    return posts
+      .filter((post) => {
+        // Search query filter
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase();
+          const matchTitle = post.title?.toLowerCase().includes(q);
+          const matchDesc = post.description?.toLowerCase().includes(q);
+          const matchAuthor = post.user_name?.toLowerCase().includes(q);
+          const matchTags = post.tags?.some((t) => t.toLowerCase().includes(q));
+          const matchCode = post.code_snippet?.toLowerCase().includes(q);
+          if (!matchTitle && !matchDesc && !matchAuthor && !matchTags && !matchCode) {
+            return false;
+          }
+        }
+
+        // Category / Type filter
+        if (selectedType !== 'all') {
+          if (post.type !== selectedType) return false;
+        }
+
+        // Tag filter
+        if (selectedTag !== 'all') {
+          if (!post.tags?.includes(selectedTag)) return false;
+        }
+
+        return true;
+      })
+      .sort((a, b) => {
+        if (sortBy === 'latest') {
+          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+        }
+        if (sortBy === 'top_rated') {
+          return (b.avg_rating || 0) - (a.avg_rating || 0);
+        }
+        if (sortBy === 'most_viewed') {
+          return (b.views_count || 0) - (a.views_count || 0);
+        }
+        return 0;
+      });
+  }, [posts, searchQuery, selectedType, selectedTag, sortBy]);
+
+  // Statistics
   const counts = useMemo(() => {
     return {
       all: posts.length,
@@ -216,51 +256,9 @@ function MainApp() {
     };
   }, [posts]);
 
-  // Filtered & Sorted Posts
-  const filteredPosts = useMemo(() => {
-    let list = [...posts];
-
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      list = list.filter((p) => {
-        return (
-          p.title?.toLowerCase().includes(q) ||
-          p.description?.toLowerCase().includes(q) ||
-          p.url?.toLowerCase().includes(q) ||
-          p.user_name?.toLowerCase().includes(q) ||
-          p.tags?.some((t) => t.toLowerCase().includes(q)) ||
-          p.file_name?.toLowerCase().includes(q) ||
-          p.code_language?.toLowerCase().includes(q)
-        );
-      });
-    }
-
-    if (selectedType !== 'all') {
-      list = list.filter((p) => p.type === selectedType);
-    }
-
-    if (selectedTag !== 'all') {
-      list = list.filter((p) => p.tags && p.tags.includes(selectedTag));
-    }
-
-    list.sort((a, b) => {
-      if (sortBy === 'top_rated') {
-        const ratingDiff = (b.avg_rating || 0) - (a.avg_rating || 0);
-        if (ratingDiff !== 0) return ratingDiff;
-        return (b.ratings_count || 0) - (a.ratings_count || 0);
-      }
-      if (sortBy === 'most_viewed') {
-        return (b.views_count || 0) - (a.views_count || 0);
-      }
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-    });
-
-    return list;
-  }, [posts, searchQuery, selectedType, selectedTag, sortBy]);
-
   return (
-    <div className="min-h-screen bg-[#07080b] text-zinc-100 flex flex-col antialiased selection:bg-indigo-500 selection:text-white">
-      {/* Top Navigation Bar */}
+    <div className="min-h-screen bg-[#090a0f] text-zinc-100 flex flex-col selection:bg-indigo-500/30 selection:text-indigo-200">
+      {/* App Header */}
       <Header
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
@@ -272,103 +270,101 @@ function MainApp() {
         onOpenLeaderboardModal={() => setIsLeaderboardOpen(true)}
         onOpenShareModal={() => setIsShareModalOpen(true)}
         onOpenDatabaseModal={() => setIsDatabaseModalOpen(true)}
-        onOpenCodeRunner={() => {
-          setCodeRunnerInitialPost(null);
-          setIsCodeRunnerOpen(true);
-        }}
+        onOpenCodeRunner={handleOpenGeneralCodeRunner}
         isSupabaseLive={isSupabaseLive}
         totalPosts={posts.length}
       />
 
-      {/* Main Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-16">
-        {/* Controls Bar: Type Filters, Tag Selectors, Sorting */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-6">
-          {/* Left Type Tabs */}
-          <div className="flex items-center gap-1.5 p-1 rounded-xl bg-zinc-900/90 border border-white/[0.08] overflow-x-auto">
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Controls Bar: Type Filters & View/Sort Actions */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+          {/* Category Tabs */}
+          <div className="flex items-center gap-1.5 p-1 bg-zinc-900/90 border border-white/[0.08] rounded-xl overflow-x-auto">
             <button
               onClick={() => setSelectedType('all')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
                 selectedType === 'all'
-                  ? 'bg-zinc-800 text-white shadow-sm font-semibold'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40'
+                  ? 'bg-zinc-800 text-white shadow-sm'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
               }`}
             >
               <span>All Types</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-black/40 text-zinc-400">
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-black/40 text-zinc-400">
                 {counts.all}
               </span>
             </button>
 
             <button
               onClick={() => setSelectedType('game')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
                 selectedType === 'game'
                   ? 'bg-purple-950/80 text-purple-300 border border-purple-500/30 font-semibold'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
               }`}
             >
               <Gamepad2 className="w-3.5 h-3.5 text-purple-400" />
               <span>Games</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-black/40 text-zinc-400">
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-black/40 text-zinc-400">
                 {counts.game}
               </span>
             </button>
 
             <button
               onClick={() => setSelectedType('project')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
                 selectedType === 'project'
                   ? 'bg-indigo-950/80 text-indigo-300 border border-indigo-500/30 font-semibold'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
               }`}
             >
               <FolderGit2 className="w-3.5 h-3.5 text-indigo-400" />
               <span>Projects</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-black/40 text-zinc-400">
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-black/40 text-zinc-400">
                 {counts.project}
               </span>
             </button>
 
             <button
               onClick={() => setSelectedType('code')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
                 selectedType === 'code'
                   ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-500/30 font-semibold'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
               }`}
             >
               <Code2 className="w-3.5 h-3.5 text-emerald-400" />
               <span>Code</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-black/40 text-zinc-400">
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-black/40 text-zinc-400">
                 {counts.code}
               </span>
             </button>
 
             <button
               onClick={() => setSelectedType('link')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer whitespace-nowrap ${
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
                 selectedType === 'link'
-                  ? 'bg-zinc-800 text-white font-semibold'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40'
+                  ? 'bg-zinc-800 text-white'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
               }`}
             >
               <Globe className="w-3.5 h-3.5 text-cyan-400" />
               <span>Resources</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-black/40 text-zinc-400">
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-black/40 text-zinc-400">
                 {counts.link}
               </span>
             </button>
           </div>
 
-          {/* Right Controls: Sort & Layout */}
+          {/* Action Bar (Tags, Sort, Layout & Refresh) */}
           <div className="flex items-center gap-2.5 self-end md:self-auto">
+            {/* Tag Filter Dropdown */}
             {allTags.length > 0 && (
               <div className="relative">
                 <select
                   value={selectedTag}
                   onChange={(e) => setSelectedTag(e.target.value)}
-                  className="appearance-none bg-zinc-900 border border-white/[0.08] text-xs text-zinc-300 pl-2.5 pr-7 py-1.5 rounded-lg focus:outline-none focus:border-indigo-500/50 cursor-pointer font-sans"
+                  className="appearance-none bg-zinc-900 border border-white/[0.08] text-xs text-zinc-300 pl-2.5 pr-7 py-1.5 rounded-lg focus:outline-none focus:border-indigo-500/50 cursor-pointer"
                 >
                   <option value="all">All Tags</option>
                   {allTags.map((tag) => (
@@ -381,7 +377,8 @@ function MainApp() {
               </div>
             )}
 
-            <div className="flex items-center gap-1 bg-zinc-900 border border-white/[0.08] p-0.5 rounded-lg text-xs text-zinc-400">
+            {/* Sort Options */}
+            <div className="flex items-center bg-zinc-900 border border-white/[0.08] p-0.5 rounded-lg text-xs text-zinc-400">
               <button
                 onClick={() => setSortBy('latest')}
                 title="Sort by latest"
@@ -416,6 +413,7 @@ function MainApp() {
               </button>
             </div>
 
+            {/* View Mode Toggle */}
             <div className="flex items-center bg-zinc-900 border border-white/[0.08] p-0.5 rounded-lg text-zinc-400">
               <button
                 onClick={() => setViewMode('grid')}
@@ -428,7 +426,7 @@ function MainApp() {
               </button>
               <button
                 onClick={() => setViewMode('compact')}
-                title="Compact list view"
+                title="Compact view"
                 className={`p-1.5 rounded-md transition-colors cursor-pointer ${
                   viewMode === 'compact' ? 'bg-zinc-800 text-white' : 'hover:text-zinc-200'
                 }`}
@@ -437,11 +435,12 @@ function MainApp() {
               </button>
             </div>
 
+            {/* Manual Refresh */}
             <button
               onClick={() => loadPosts(true)}
               disabled={isRefreshing}
-              title="Refresh resources"
-              className="p-1.5 rounded-lg bg-zinc-900 border border-white/[0.08] text-zinc-400 hover:text-white transition-colors cursor-pointer disabled:opacity-50"
+              title="Refresh resources from Supabase"
+              className="p-1.5 rounded-lg bg-zinc-900 border border-white/[0.08] text-zinc-400 hover:text-white transition-colors disabled:opacity-50 cursor-pointer"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-indigo-400' : ''}`} />
             </button>
@@ -452,7 +451,7 @@ function MainApp() {
         {isLoading ? (
           <div className="py-24 flex flex-col items-center justify-center text-center">
             <RefreshCw className="w-6 h-6 text-indigo-400 animate-spin mb-3" />
-            <p className="text-sm font-mono text-zinc-400">Syncing resources from database...</p>
+            <p className="text-sm font-mono text-zinc-400">Connecting to database...</p>
           </div>
         ) : filteredPosts.length === 0 ? (
           <div className="py-20 flex flex-col items-center justify-center text-center max-w-sm mx-auto">
@@ -462,7 +461,7 @@ function MainApp() {
             <h3 className="text-base font-bold text-zinc-200">No resources found</h3>
             <p className="text-xs text-zinc-500 mt-1 mb-4">
               {searchQuery
-                ? `No posts matched "${searchQuery}". Try different keywords or reset filters.`
+                ? `No submissions matched "${searchQuery}". Try different keywords or reset filters.`
                 : 'No submissions yet in this category. Be the first to share something!'}
             </p>
             {searchQuery ? (
@@ -472,7 +471,7 @@ function MainApp() {
                   setSelectedType('all');
                   setSelectedTag('all');
                 }}
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-zinc-300 bg-zinc-900 border border-white/[0.08] hover:bg-zinc-800 transition-all cursor-pointer"
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-zinc-300 bg-zinc-900 border border-white/[0.08] hover:bg-zinc-800 transition-colors cursor-pointer"
               >
                 Clear all filters
               </button>
@@ -482,7 +481,7 @@ function MainApp() {
                   if (!user) setIsAuthModalOpen(true);
                   else setIsNewPostOpen(true);
                 }}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 transition-all cursor-pointer"
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 transition-colors cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>Submit first resource</span>
@@ -533,23 +532,21 @@ function MainApp() {
       </main>
 
       {/* Footer */}
-      <footer className="w-full border-t border-white/[0.06] py-6 mt-12 bg-[#08090d]">
+      <footer className="w-full border-t border-white/[0.06] py-6 bg-[#08090d]">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-zinc-500">
           <div className="flex items-center gap-2">
             <span className="font-semibold text-zinc-400">TeamHub</span>
             <span>—</span>
             <span>Developer Hub & Live Compiler</span>
           </div>
-          <div className="flex items-center gap-4 text-xs">
+          <div className="flex items-center gap-4 text-[11px]">
             <span className="flex items-center gap-1.5">
-              <span className={`w-2 h-2 rounded-full ${isSupabaseLive ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-              <span className="text-zinc-400 font-mono text-[11px]">
-                {isSupabaseLive ? 'Supabase Synchronized' : 'Local Fallback'}
-              </span>
+              <span className={`w-1.5 h-1.5 rounded-full ${isSupabaseLive ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+              {isSupabaseLive ? 'Supabase Synchronized' : 'Offline Cache Active'}
             </span>
             <button
               onClick={() => setIsDatabaseModalOpen(true)}
-              className="text-zinc-400 hover:text-indigo-400 underline decoration-white/10 underline-offset-4 cursor-pointer"
+              className="text-zinc-400 hover:text-white transition-colors cursor-pointer underline"
             >
               Schema / SQL
             </button>
@@ -558,12 +555,10 @@ function MainApp() {
       </footer>
 
       {/* Modals */}
-      <NewPostModal
+      <NewSubmissionModal
         isOpen={isNewPostOpen}
         onClose={() => setIsNewPostOpen(false)}
-        onPostCreated={(newPost) => {
-          setPosts((prev) => [newPost, ...prev]);
-        }}
+        onPostCreated={handlePostCreated}
       />
 
       <AuthModal
@@ -597,21 +592,25 @@ function MainApp() {
           isOpen={Boolean(editingPost)}
           post={editingPost}
           onClose={() => setEditingPost(null)}
-          onPostUpdated={(updated) => {
-            setPosts((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-            setEditingPost(null);
-          }}
+          onPostUpdated={handlePostUpdated}
         />
       )}
 
-      {/* Interactive Code Runner Modal */}
+      <DatabaseModal
+        isOpen={isDatabaseModalOpen}
+        onClose={() => setIsDatabaseModalOpen(false)}
+        isLive={isSupabaseLive}
+        onRefresh={loadPosts}
+      />
+
       <CodeRunnerModal
         isOpen={isCodeRunnerOpen}
         onClose={() => {
           setIsCodeRunnerOpen(false);
-          setCodeRunnerInitialPost(null);
+          setCodeRunnerPost(null);
         }}
-        initialPost={codeRunnerInitialPost}
+        initialPost={codeRunnerPost}
+        onPostCreated={handlePostCreated}
       />
     </div>
   );
